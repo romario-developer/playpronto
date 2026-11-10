@@ -1,0 +1,18 @@
+# ambiente Python (recriar com os comandos do README)
+.venv/
+__pycache__/
+*.pyc
+
+# músicas processadas, downloads e logs (grandes e com direitos autorais)
+VS/
+
+# pacote gerado pelo instalador\gerar_pacote.ps1
+dist/
+
+# temporários do gerador de vídeo
+video/_*
+video/previa_*.png
+
+# sistema
+Thumbs.db
+desktop.ini

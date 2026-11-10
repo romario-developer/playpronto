@@ -1,0 +1,9 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.15.0+cpu
+demucs==4.1.0
+yt-dlp==2026.10.26
+deno==2.9.8
+librosa==1.0.0
+soundfile==0.14.0
+imageio-ffmpeg==0.8.1
+numpy==2.5.4

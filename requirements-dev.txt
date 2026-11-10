@@ -1,0 +1,5 @@
+# ferramentas só de desenvolvimento (testes do script Lua, ícones e vídeo de anúncio)
+-r requirements.txt
+lupa
+pillow
+faster-whisper
