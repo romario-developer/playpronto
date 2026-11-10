@@ -13,6 +13,8 @@ a IA separa os instrumentos e o projeto abre pronto no REAPER.
 | Caminho | O que é |
 |---|---|
 | `criar_vs.py` | Motor: download, separação (Demucs), tom (Rubber Band), click, projeto `.RPP` |
+| `licenca.py` | Licença: ativação, renovação, teste grátis (3 músicas), confere assinatura |
+| `servidor/` | Servidor de licenças (Cloudflare Worker + D1), webhooks Hotmart/Kiwify e `admin.py` — ver `servidor/LEIA-ME.md` |
 | `reaper/PlayPronto.lua` | O botão/janela dentro do REAPER (ReaScript) |
 | `reaper/icones/` | Ícone da barra de ferramentas (100/150/200%) e logo — gerados por `gerar_icone.py` |
 | `PlayPronto.bat` | Usar sem o REAPER aberto (pergunta modo, link, BPM e tom) |

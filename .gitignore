@@ -13,6 +13,12 @@ dist/
 video/_*
 video/previa_*.png
 
+# servidor de licenças: SEGREDOS (nunca no git!) e arquivos gerados
+servidor/.chaves/
+servidor/.dev.vars
+servidor/node_modules/
+servidor/.wrangler/
+
 # sistema
 Thumbs.db
 desktop.ini

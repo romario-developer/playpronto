@@ -48,13 +48,113 @@ local E = {
   tom = 0,                  -- semitons (-12 a +12); bateria e percussão não mudam
   etapa = "", porc = nil, inicio = 0, titulo = "", msg = "",
   res = nil, log = nil, pid = nil, posicao = 0,
+  lic = { tipo = "carregando" },  -- licenca | teste | sem_licenca | erro | carregando
+  lic_job = nil,
 }
 local janela = true
+local LICENCA_PY = PASTA_CRIADOR .. [[\licenca.py]]
+
+------------------------------------------------------------------ licença (roda licenca.py escondido)
+local function rodar_escondido(args, res, log)
+  reaper.RecursiveCreateDirectory(TMP, 0)
+  local id = os.date("%H%M%S") .. "_" .. math.random(1000, 9999)
+  local bat = TMP .. "\\lic_" .. id .. ".bat"
+  local vbs = TMP .. "\\lic_" .. id .. ".vbs"
+  gravar(bat, "@echo off\r\nchcp 65001 >nul\r\nset PYTHONUTF8=1\r\n" .. aspas(PYTHON) .. " " .. args ..
+              " > " .. aspas(log) .. " 2>&1\r\ndel \"%~dp0lic_" .. id .. ".vbs\"\r\ndel \"%~f0\"\r\n")
+  gravar(vbs, 'CreateObject("WScript.Shell").Run """' .. bat .. '""", 0, False\r\n')
+  reaper.ExecProcess('wscript.exe "' .. vbs .. '"', -1)
+end
+
+local function licenca(acao, chave)
+  local id = math.random(100000, 999999)
+  local res = TMP .. "\\licres_" .. id .. ".txt"
+  local args = aspas(LICENCA_PY) .. " --" .. acao
+  if chave then args = args .. " " .. chave end
+  rodar_escondido(args .. " --saida " .. aspas(res), res, TMP .. "\\liclog.txt")
+  E.lic_job = { acao = acao, res = res, inicio = reaper.time_precise() }
+  if acao == "status" and E.lic.tipo ~= "licenca" and E.lic.tipo ~= "teste" then E.lic = { tipo = "carregando" } end
+end
+
+local function ler_tabela(txt)
+  local t = {}
+  for linha in txt:gmatch("[^\r\n]+") do
+    local k, v = linha:match("^(%u+)\t(.*)$")
+    if k then t[k:lower()] = v end
+  end
+  return t
+end
+
+local function verificar_licenca()
+  local j = E.lic_job
+  if not j then return end
+  local txt = ler(j.res)
+  if not (txt and txt:find("\nFIM") or (txt and txt:find("^FIM"))) then
+    if reaper.time_precise() - j.inicio > 40 then
+      E.lic_job = nil
+      E.lic = { tipo = "erro", msg = "O verificador de licença não respondeu." }
+    end
+    return
+  end
+  os.remove(j.res)
+  E.lic_job = nil
+  local t = ler_tabela(txt)
+  if j.acao == "status" then
+    t.restantes = tonumber(t.restantes)
+    E.lic = t
+  elseif j.acao == "ativar" then
+    if t.tipo == "ativada" then
+      reaper.ShowMessageBox("Licença ativada! Obrigado por comprar o PlayPronto." ..
+        ((t.nome or "") ~= "" and ("\n\nLicenciado para: " .. t.nome) or ""), NOME, 0)
+      if E.tela == "licenca" then E.tela = "inicio" end
+    else
+      reaper.ShowMessageBox("Não consegui ativar:\n\n" .. (t.msg or "erro desconhecido"), NOME, 0)
+    end
+    licenca("status")
+  elseif j.acao == "desativar" then
+    reaper.ShowMessageBox(t.msg or "Pronto.", NOME, 0)
+    licenca("status")
+  end
+end
+
+local function pedir_chave()
+  local ok, r = reaper.GetUserInputs(NOME .. " - ativar licença", 1,
+    "Chave de licença (PLAY-....):,extrawidth=260", "")
+  if not ok then return end
+  local chave = trim(r):upper():gsub("[^A-Z0-9%-]", "")
+  if not chave:match("^PLAY%-%w%w%w%w%-%w%w%w%w%-%w%w%w%w%-%w%w%w%w$") then
+    reaper.ShowMessageBox("Chave inválida. Ela tem este formato:\nPLAY-XXXX-XXXX-XXXX-XXXX", NOME, 0)
+    return
+  end
+  licenca("ativar", chave)
+end
+
+local function menu_licenca()
+  if E.lic_job then return end
+  if E.lic.tipo == "licenca" then
+    local r = reaper.ShowMessageBox("PlayPronto licenciado" ..
+      ((E.lic.nome or "") ~= "" and (" para " .. E.lic.nome) or "") ..
+      ((E.lic.email or "") ~= "" and ("\n" .. E.lic.email) or "") ..
+      "\n\nQuer DESATIVAR este computador?\n(libera a vaga para usar a licença em outro PC)", NOME, 4)
+    if r == 6 then licenca("desativar") end
+  else
+    pedir_chave()
+  end
+end
+
+local function abrir_link(u)
+  if u and u ~= "" then reaper.ExecProcess('cmd.exe /C start "" "' .. u .. '"', -1) end
+end
 
 ------------------------------------------------------------------ rodar o Python separado do REAPER
 local function iniciar(entrada)
   entrada = trim(entrada)
   if entrada == "" then return end
+  if E.lic.tipo == "sem_licenca" then -- nem começa: vai direto para a tela de licença
+    E.msg = E.lic.msg or "Ative sua licença para continuar."
+    E.tela = "licenca"
+    return
+  end
   reaper.RecursiveCreateDirectory(TMP, 0)
   local id = os.date("%Y%m%d_%H%M%S") .. "_" .. math.random(100, 999)
   E.res = TMP .. "\\res_" .. id .. ".txt"
@@ -213,6 +313,7 @@ local function concluir(txt)
   end
   E.tela = "pronto"
   if not janela then reaper.ShowMessageBox("Pronto: " .. E.titulo .. "\n" .. E.msg, NOME, 0) end
+  if E.lic.tipo == "teste" then licenca("status") end -- atualiza quantas músicas grátis restam
 end
 
 local function verificar()
@@ -233,6 +334,8 @@ local function verificar()
   if res and res:find("\nFIM") then concluir(res); return end
   if res and res:find("^ERRO") then
     E.msg = res:match("^ERRO\t([^\r\n]*)") or "erro desconhecido"
+    local m = E.msg:match("^LICENCA|(.*)$")
+    if m then E.msg = m; E.tela = "licenca"; licenca("status"); return end
     E.tela = "erro"; return
   end
   if log and log:find("Traceback") and reaper.time_precise() - E.inicio > 5 then
@@ -316,8 +419,57 @@ local function cabecalho(sub)
   fonte(3); texto(sub, 74, 46, 160, 160, 170)
 end
 
+-- selo no canto: estado da licença (clicável)
+local function selo_licenca()
+  local L = E.lic
+  local rot, cor_f, cor_t = "verificando...", { 50, 50, 58 }, { 150, 150, 160 }
+  if E.lic_job and E.lic_job.acao ~= "status" then rot = "aguarde..."
+  elseif L.tipo == "licenca" then rot, cor_f, cor_t = "✓ Licenciado", { 35, 70, 40 }, { 140, 230, 150 }
+  elseif L.tipo == "teste" then
+    rot, cor_f, cor_t = "Teste: " .. (L.restantes or "?") .. " grátis", { 70, 55, 25 }, { 255, 200, 90 }
+  elseif L.tipo == "sem_licenca" then rot, cor_f, cor_t = "Ativar licença", { 245, 170, 35 }, { 35, 20, 5 }
+  elseif L.tipo == "erro" then rot, cor_f, cor_t = "Sem conexão", { 80, 40, 40 }, { 240, 150, 140 }
+  end
+  fonte(3)
+  local tw = gfx.measurestr(rot)
+  local w, h = tw + 20, 24
+  local x, y = W - 16 - w, 18
+  local sobre = gfx.mouse_x >= x and gfx.mouse_x <= x + w and gfx.mouse_y >= y and gfx.mouse_y <= y + h
+  rgb(cor_f[1] + (sobre and 20 or 0), cor_f[2] + (sobre and 20 or 0), cor_f[3] + (sobre and 20 or 0))
+  caixa(x, y, w, h, 11, true)
+  rgb(cor_t[1], cor_t[2], cor_t[3]); gfx.x, gfx.y = x + 10, y + 4; gfx.drawstr(rot)
+  if sobre and clique then
+    if L.tipo == "erro" then licenca("status") else menu_licenca() end
+  end
+end
+
+-- quebra texto em linhas que cabem na largura
+local function texto_quebrado(s, x, y, largura, r, g, b, alt)
+  local linha = ""
+  for palavra in (s or ""):gmatch("%S+") do
+    local teste = linha == "" and palavra or (linha .. " " .. palavra)
+    if gfx.measurestr(teste) > largura and linha ~= "" then
+      texto(linha, x, y, r, g, b); y = y + (alt or 20); linha = palavra
+    else linha = teste end
+  end
+  if linha ~= "" then texto(linha, x, y, r, g, b); y = y + (alt or 20) end
+  return y
+end
+
+local function tela_licenca()
+  cabecalho("Licença necessária")
+  fonte(3)
+  local y = texto_quebrado(E.msg, 20, 92, W - 40, 240, 200, 120)
+  texto_quebrado("Já comprou? Clique em Ativar e cole a chave que chegou no seu e-mail.", 20, y + 10, W - 40,
+    170, 170, 180)
+  if botao("Ativar licença", 20, 200, W - 40, 42, true) then pedir_chave() end
+  if (E.lic.link or "") ~= "" and botao("Comprar o PlayPronto", 20, 250, 200, 38) then abrir_link(E.lic.link) end
+  if botao("Voltar", W - 140, 250, 120, 38) then E.tela = "inicio" end
+end
+
 local function tela_inicio()
   cabecalho("Playback e VS com IA direto no Reaper")
+  selo_licenca()
   local cw = (W - 50) / 2
   if cartao("VS", "instrumentos separados", 20, 78, cw, 54, E.tipo == "vs") then
     E.tipo = "vs"; set_cfg("tipo", "vs") end
@@ -388,9 +540,10 @@ end
 local ultimo = 0
 
 local function loop()
-  if E.tela == "processando" and reaper.time_precise() - ultimo > 0.5 then
+  if reaper.time_precise() - ultimo > 0.5 then
     ultimo = reaper.time_precise()
-    verificar()
+    if E.tela == "processando" then verificar() end
+    verificar_licenca()
   end
 
   if janela then
@@ -402,17 +555,19 @@ local function loop()
       if E.tela == "inicio" then tela_inicio()
       elseif E.tela == "processando" then tela_processando()
       elseif E.tela == "pronto" then tela_pronto()
+      elseif E.tela == "licenca" then tela_licenca()
       else tela_erro() end
       mouse_antes = gfx.mouse_cap
       gfx.update()
     end
   end
 
-  if janela or E.tela == "processando" then reaper.defer(loop) end
+  if janela or E.tela == "processando" or E.lic_job then reaper.defer(loop) end
 end
 
 gfx.init(NOME, W, H, 0, 300, 200)
 gfx.setfont(1, "Segoe UI", 24, string.byte("b"))
 gfx.setfont(2, "Segoe UI", 17, string.byte("b"))
 gfx.setfont(3, "Segoe UI", 15)
+licenca("status")
 loop()

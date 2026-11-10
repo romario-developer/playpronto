@@ -330,6 +330,15 @@ def main():
     args = ap.parse_args()
     print(f"PID:{os.getpid()}", flush=True)
 
+    import licenca
+    log("Verificando licença...")
+    try:
+        lic = licenca.checar_para_uso()
+    except licenca.ErroLicenca as e:
+        sys.exit("LICENCA|" + e.msg)  # o botão do Reaper reconhece e abre a tela de ativação
+    if lic["tipo"] == "teste":
+        print(f"   Teste grátis: {lic['restantes']} de {lic['total']} músicas restantes", flush=True)
+
     tmp = SAIDA / "_downloads"
     if re.match(r"https?://", args.entrada):
         log("Baixando áudio do YouTube...")
@@ -366,6 +375,13 @@ def main():
 
     faixas = layout(args.modo, titulo, arquivos)
     rpp = montar_rpp(pasta, titulo + sufixo, faixas, bpm, duracao)
+
+    if lic["tipo"] == "teste":  # só conta a música do teste depois que deu tudo certo
+        try:
+            restantes = licenca.consumir_teste()
+            print(f"   Teste grátis: restam {restantes} música(s)", flush=True)
+        except licenca.ErroLicenca:
+            pass
 
     if args.resultado:
         escrever_resultado(args.resultado, titulo, bpm, primeira, duracao, faixas, rpp, args.modo, mp3)

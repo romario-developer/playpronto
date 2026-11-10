@@ -64,7 +64,7 @@ try {
     # ------------------------------------------------------------ arquivos
     Titulo "2/6  Copiando o PlayPronto"
     New-Item -ItemType Directory -Force "$Destino\reaper\icones" | Out-Null
-    Copy-Item "$PACOTE\app\criar_vs.py", "$PACOTE\app\requirements.txt" $Destino -Force
+    Copy-Item "$PACOTE\app\criar_vs.py", "$PACOTE\app\licenca.py", "$PACOTE\app\requirements.txt" $Destino -Force
     Copy-Item "$PACOTE\app\reaper\PlayPronto.lua" "$Destino\reaper" -Force
     Copy-Item "$PACOTE\app\reaper\icones\*" "$Destino\reaper\icones" -Recurse -Force
     Copy-Item "$PACOTE\desinstalar.ps1" $Destino -Force
@@ -103,7 +103,7 @@ try {
     Titulo "4/6  Instalando a inteligência artificial (parte mais demorada)"
     & $py -m pip install -r "$Destino\requirements.txt" --no-warn-script-location --disable-pip-version-check
     if ($LASTEXITCODE -ne 0) { Falha "Falha ao instalar as bibliotecas. Confira sua internet e rode de novo." }
-    & $py -c "import torch, demucs, librosa, yt_dlp, soundfile; print('    bibliotecas OK')"
+    & $py -c "import torch, demucs, librosa, yt_dlp, soundfile, cryptography; print('    bibliotecas OK')"
     if ($LASTEXITCODE -ne 0) { Falha "As bibliotecas foram instaladas mas não abriram." }
     Ok "IA instalada"
 

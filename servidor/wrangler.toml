@@ -1,0 +1,22 @@
+name = "playpronto-licencas"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+TESTE_MUSICAS = "3"        # músicas grátis por computador
+MAX_PCS_PADRAO = "2"       # PCs por licença
+VALIDADE_DIAS = "30"       # quanto tempo o app funciona offline sem renovar
+LINK_COMPRA = ""           # link da página de venda (Hotmart/Kiwify)
+REMETENTE = ""             # ex.: "PlayPronto <licenca@seudominio.com>" (para enviar a chave por e-mail via Resend)
+
+[[d1_databases]]
+binding = "DB"
+database_name = "playpronto"
+database_id = "fa216fc9-d450-40ca-a4df-ba6e84ab1526"
+
+# Segredos (NÃO ficam neste arquivo). Configure com: npx wrangler secret put NOME
+#   LICENCA_PRIVADA  -> conteúdo de .chaves/privada_pkcs8.b64
+#   ADMIN_TOKEN      -> conteúdo de .chaves/admin_token.txt
+#   HOTMART_HOTTOK   -> "hottok" do webhook da Hotmart (se usar Hotmart)
+#   KIWIFY_TOKEN     -> token do webhook da Kiwify (se usar Kiwify)
+#   RESEND_API_KEY   -> opcional, para mandar a chave por e-mail

@@ -7,7 +7,10 @@ $BOM = New-Object System.Text.UTF8Encoding $true
 if (Test-Path $dist) { Remove-Item -Recurse -Force $dist }
 New-Item -ItemType Directory -Force "$dist\app\reaper\icones" | Out-Null
 
-Copy-Item "$raiz\criar_vs.py", "$raiz\requirements.txt" "$dist\app"
+Copy-Item "$raiz\criar_vs.py", "$raiz\licenca.py", "$raiz\requirements.txt" "$dist\app"
+if ((Get-Content "$raiz\licenca.py" -Raw) -match "SEU-USUARIO") {
+    Write-Warning "licenca.py ainda aponta para o servidor de exemplo. Publique o servidor e ajuste SERVIDOR_PADRAO antes de vender."
+}
 Copy-Item "$raiz\reaper\PlayPronto.lua" "$dist\app\reaper"
 foreach ($s in @("", "150", "200")) {
     $o = if ($s) { "$raiz\reaper\icones\$s" } else { "$raiz\reaper\icones" }
