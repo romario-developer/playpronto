@@ -9,11 +9,13 @@ Uso:
 Saída: pasta VS\\<nome da música>\\ com os WAVs e o arquivo .RPP para abrir no Reaper.
 """
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import imageio_ffmpeg
@@ -44,7 +46,10 @@ FAIXAS = {
     "guitar": ("Guitarra/Violao", (80, 170, 80)),
     "piano": ("Teclado/Piano", (70, 130, 220)),
     "other": ("Outros (sanfona, cordas...)", (150, 100, 200)),
+    "other_perc": ("Outros (percussão)", (190, 90, 120)),
 }
+# partes que mudam de tom; bateria, "outros (percussão)" e click ficam iguais
+TOM_CHAVES = ("bass", "guitar", "piano", "other", "vocals")
 
 
 def log(msg):
@@ -107,28 +112,42 @@ def separar(wav_original, pasta, modo="vs", tom=0):
     fontes = fontes * desvio + media
 
     arquivos = {}
-    if modo == "vs":
-        for nome, fonte in zip(model.sources, fontes):
-            caminho = pasta / f"{nome}.wav"
-            sf.write(str(caminho), fonte.numpy().T, sr, subtype="PCM_24")
-            arquivos[nome] = caminho
-        return arquivos
-
-    # playback = música original menos a voz (mantém 100% do instrumental, sem perder nada)
     fontes_np = dict(zip(model.sources, (f.numpy().T for f in fontes)))
-    voz = fontes_np["vocals"]
-    playback = audio[: len(voz)] - voz
-    pico = np.abs(playback).max()
-    if pico > 0.999:  # evita distorcer
-        playback = playback * (0.999 / pico)
-    salvar = [("vocals", voz), ("playback", playback), ("drums", fontes_np["drums"])]
-    if tom:  # para mudar o tom precisamos das partes separadas (o playback é remontado depois)
-        salvar += [("bass", fontes_np["bass"]), ("other", fontes_np["other"])]
-    for nome, dado in salvar:
+    if modo == "playback":
+        # playback = música original menos a voz (mantém 100% do instrumental, sem perder nada)
+        voz = fontes_np["vocals"]
+        playback = audio[: len(voz)] - voz
+        pico = np.abs(playback).max()
+        if pico > 0.999:  # evita distorcer
+            playback = playback * (0.999 / pico)
+        fontes_np["playback"] = playback
+    # as partes ficam guardadas: com elas dá para mudar o tom depois sem separar de novo
+    for nome, dado in fontes_np.items():
         caminho = pasta / f"{nome}.wav"
         sf.write(str(caminho), dado, sr, subtype="PCM_24")
         arquivos[nome] = caminho
+    dividir_outros(pasta, arquivos)
     return arquivos
+
+
+def dividir_outros(pasta, arquivos):
+    """'other' (sanfona, cordas, percussão solta...) vira parte harmônica (muda de tom)
+    e parte percussiva (fica igual). As duas somadas dão exatamente o 'other' original."""
+    import librosa
+
+    log("Separando a percussão da faixa Outros...")
+    a, sr = _ler(arquivos["other"])
+    n = len(a)
+    harm = np.zeros_like(a)
+    perc = np.zeros_like(a)
+    for c in range(a.shape[1]):
+        S = librosa.stft(a[:, c], n_fft=4096, hop_length=1024)
+        Sh, Sp = librosa.decompose.hpss(S, margin=2.0)
+        perc[:, c] = librosa.istft(Sp, hop_length=1024, length=n)
+        harm[:, c] = a[:, c] - perc[:, c]  # o resto (inclusive o que não é claro) fica no harmônico
+    sf.write(str(arquivos["other"]), harm, sr, subtype="PCM_24")
+    arquivos["other_perc"] = pasta / "other_perc.wav"
+    sf.write(str(arquivos["other_perc"]), perc, sr, subtype="PCM_24")
 
 
 # ---------------------------------------------------------------- 2b. mudar o tom
@@ -147,55 +166,63 @@ def _ler(p, n=None):
     return a, sr
 
 
-def aplicar_tom(pasta, arquivos, modo, tom):
-    """Muda o tom das partes melódicas. Bateria e percussão ficam intactas.
-    A faixa 'other' (sanfona, cordas, percussão solta...) é dividida em parte harmônica
-    (muda o tom) e parte percussiva (fica igual)."""
-    import librosa
+def _normalizar(x):
+    p = np.abs(x).max()
+    return x * (0.999 / p) if p > 0.999 else x
 
-    log(f"Mudando o tom ({tom:+d} semitons) sem mexer na bateria e percussão...")
-    n = sf.info(str(arquivos["drums"])).frames
-    melodicas = [k for k in ("bass", "guitar", "piano", "vocals") if k in arquivos]
-    for k in melodicas:
-        tmp = pasta / f"_{k}_tom.wav"
-        _rubberband(arquivos[k], tmp, tom, voz=(k == "vocals"))
-        a, sr = _ler(tmp, n)
-        sf.write(str(arquivos[k]), a, sr, subtype="PCM_24")
-        tmp.unlink()
 
-    # 'other': separa harmônico x percussivo
-    a, sr = _ler(arquivos["other"], n)
-    harm = np.zeros_like(a)
-    perc = np.zeros_like(a)
-    for c in range(a.shape[1]):
-        S = librosa.stft(a[:, c], n_fft=4096, hop_length=1024)
-        Sh, Sp = librosa.decompose.hpss(S, margin=2.0)
-        resto = S - Sh - Sp  # o que não é claramente nenhum dos dois vai junto com o harmônico
-        harm[:, c] = librosa.istft(Sh + resto, hop_length=1024, length=n)
-        perc[:, c] = librosa.istft(Sp, hop_length=1024, length=n)
-    tmp_h, tmp_h2 = pasta / "_other_harm.wav", pasta / "_other_harm_tom.wav"
-    sf.write(str(tmp_h), harm, sr, subtype="FLOAT")
-    _rubberband(tmp_h, tmp_h2, tom)
-    harm_tom, _ = _ler(tmp_h2, n)
-    sf.write(str(arquivos["other"]), harm_tom + perc, sr, subtype="PCM_24")
-    tmp_h.unlink(); tmp_h2.unlink()
+def salvar_info(pasta, titulo, modo, arquivos):
+    """Guarda na pasta da música quais são as partes no tom original (para mudar o tom depois)."""
+    info = {"titulo": titulo, "modo": modo,
+            "arquivos": {k: v.relative_to(pasta).as_posix() for k, v in arquivos.items()}}
+    (pasta / "playpronto.json").write_text(json.dumps(info, ensure_ascii=False, indent=1), encoding="utf-8")
 
-    # remonta a guia original (no tom novo) e, no modo playback, o próprio playback
-    partes = [k for k in ("drums", "bass", "guitar", "piano", "other") if k in arquivos]
-    instrumental = sum(_ler(arquivos[k], n)[0] for k in partes)
-    voz, _ = _ler(arquivos["vocals"], n)
 
-    def normalizar(x):
-        p = np.abs(x).max()
-        return x * (0.999 / p) if p > 0.999 else x
+def nome_mp3(pasta, titulo, tom):
+    return pasta / (nome_seguro(titulo) + (f" (Tom {tom:+d})" if tom else "") + " - Playback.mp3")
 
-    guia = pasta / "original_no_tom.wav"
-    sf.write(str(guia), normalizar(instrumental + voz), sr, subtype="PCM_24")
-    arquivos["original"] = guia
+
+def aplicar_tom_pasta(pasta, tom):
+    """Arquivos da música no tom pedido. As partes originais nunca são alteradas: o tom novo vai para
+    a subpasta 'Tom +N' (se já existir, reaproveita na hora). Bateria e percussão não mudam.
+    Devolve (arquivos, mp3)."""
+    info = json.loads((pasta / "playpronto.json").read_text(encoding="utf-8"))
+    modo, titulo = info["modo"], info["titulo"]
+    orig = {k: pasta / v for k, v in info["arquivos"].items()}
+    out = dict(orig)
+    if tom:
+        dest = pasta / f"Tom {tom:+d}"
+        mover = [k for k in TOM_CHAVES if k in orig]
+        if not (dest / ".pronto").exists():
+            log(f"Mudando o tom ({tom:+d} semitons) sem mexer na bateria e percussão...")
+            dest.mkdir(exist_ok=True)
+            n = sf.info(str(orig["drums"])).frames
+            with ThreadPoolExecutor(max_workers=4) as ex:  # uma faixa por núcleo
+                list(ex.map(lambda k: _rubberband(orig[k], dest / f"_{k}.wav", tom, voz=(k == "vocals")), mover))
+            for k in mover:
+                a, sr = _ler(dest / f"_{k}.wav", n)
+                sf.write(str(dest / f"{k}.wav"), a, sr, subtype="PCM_24")
+                (dest / f"_{k}.wav").unlink()
+            log("Montando a guia e o playback no tom novo...")
+            fixas = [orig[k] for k in ("drums", "other_perc") if k in orig]
+            novas = [dest / f"{k}.wav" for k in mover if k != "vocals"]
+            instrumental = sum(_ler(f, n)[0] for f in fixas + novas)
+            voz, sr = _ler(dest / "vocals.wav", n)
+            sf.write(str(dest / "original.wav"), _normalizar(instrumental + voz), sr, subtype="PCM_24")
+            if modo == "playback":
+                sf.write(str(dest / "playback.wav"), _normalizar(instrumental), sr, subtype="PCM_24")
+            (dest / ".pronto").write_text("ok")
+        for k in mover:
+            out[k] = dest / f"{k}.wav"
+        out["original"] = dest / "original.wav"
+        if modo == "playback":
+            out["playback"] = dest / "playback.wav"
+    mp3 = None
     if modo == "playback":
-        sf.write(str(arquivos["playback"]), normalizar(instrumental), sr, subtype="PCM_24")
-        for k in ("bass", "other"):
-            arquivos.pop(k).unlink(missing_ok=True)
+        mp3 = nome_mp3(pasta, titulo, tom)
+        if not mp3.exists():
+            exportar_mp3(out["playback"], mp3)
+    return out, mp3
 
 
 def exportar_mp3(wav, destino):
@@ -251,7 +278,8 @@ def cor_reaper(rgb):
     return (b << 16 | g << 8 | r) | 0x1000000
 
 
-def faixa_rpp(nome, arquivo, duracao, cor, mudo=False, volume=1.0, pasta_inicio=0, pasta_fim=0):
+def faixa_rpp(nome, arquivo, duracao, cor, mudo=False, volume=1.0, pasta_inicio=0, pasta_fim=0, base=None):
+    rel = os.path.relpath(arquivo, base) if base else arquivo.name
     return f"""  <TRACK {guid()}
     NAME "{nome}"
     PEAKCOL {cor_reaper(cor)}
@@ -264,7 +292,7 @@ def faixa_rpp(nome, arquivo, duracao, cor, mudo=False, volume=1.0, pasta_inicio=
       LENGTH {duracao:.6f}
       NAME "{arquivo.name}"
       <SOURCE WAVE
-        FILE "{arquivo.name}"
+        FILE "{rel}"
       >
     >
   >
@@ -273,21 +301,25 @@ def faixa_rpp(nome, arquivo, duracao, cor, mudo=False, volume=1.0, pasta_inicio=
 
 def layout(modo, titulo, arquivos):
     """Lista de faixas do projeto. Usada tanto no .RPP quanto pelo botão do Reaper.
-    ("TRACK", nome, arquivo, cor, mudo, pasta, volume) | ("FOLDER", nome, cor)"""
+    ("TRACK", nome, arquivo, cor, mudo, pasta, volume, chave) | ("FOLDER", nome, cor, chave, mudo)
+    'chave' diz ao botão do Reaper o que é cada faixa (para mudar o tom ao vivo)."""
     L = [
-        ("TRACK", "GUIA - Original", arquivos["original"], (120, 120, 120), 1, 0, 1.0),
-        ("TRACK", "GUIA - Voz", arquivos["vocals"], (240, 90, 160), 1, 0, 1.0),
+        ("TRACK", "GUIA - Original", arquivos["original"], (120, 120, 120), 1, 0, 1.0, "original"),
+        ("TRACK", "GUIA - Voz", arquivos["vocals"], (240, 90, 160), 1, 0, 1.0, "vocals"),
     ]
     if modo == "playback":
-        L.append(("TRACK", "CLICK", arquivos["click"], (255, 255, 0), 1, 0, 0.7))  # mudo: playback não precisa
-        L.append(("TRACK", f"PLAYBACK - {titulo}", arquivos["playback"], (245, 170, 35), 0, 0, 1.0))
-        return L
-    L.append(("TRACK", "CLICK", arquivos["click"], (255, 255, 0), 0, 0, 0.7))
-    L.append(("FOLDER", f"VS - {titulo}", (40, 40, 40)))
-    nomes = [k for k in FAIXAS if k in arquivos]
+        L.append(("TRACK", "CLICK", arquivos["click"], (255, 255, 0), 1, 0, 0.7, "click"))  # mudo: playback não precisa
+        L.append(("TRACK", f"PLAYBACK - {titulo}", arquivos["playback"], (245, 170, 35), 0, 0, 1.0, "playback"))
+        # partes do playback: ficam mudas; o botão usa para você ouvir o tom novo antes de confirmar
+        L.append(("FOLDER", "PARTES (para mudar o tom)", (60, 60, 60), "partes", 1))
+        nomes = [k for k in ("drums", "other_perc", "bass", "other") if k in arquivos]
+    else:
+        L.append(("TRACK", "CLICK", arquivos["click"], (255, 255, 0), 0, 0, 0.7, "click"))
+        L.append(("FOLDER", f"VS - {titulo}", (40, 40, 40), "vs", 0))
+        nomes = [k for k in FAIXAS if k in arquivos]
     for i, k in enumerate(nomes):
         nome, cor = FAIXAS[k]
-        L.append(("TRACK", nome, arquivos[k], cor, 0, -1 if i == len(nomes) - 1 else 0, 1.0))
+        L.append(("TRACK", nome, arquivos[k], cor, 0, -1 if i == len(nomes) - 1 else 0, 1.0, k))
     return L
 
 
@@ -298,12 +330,15 @@ def montar_rpp(pasta, titulo, faixas, bpm, duracao):
             blocos.append(f"""  <TRACK {guid()}
     NAME "{f[1]}"
     PEAKCOL {cor_reaper(f[2])}
+    MUTESOLO {f[4]} 0 0
     ISBUS 1 1
+    BUSCOMP {2 if f[4] else 0} 0 0 0 0
   >
 """)
         else:
-            _, nome, arq, cor, mudo, pasta_fim, vol = f
-            blocos.append(faixa_rpp(nome, arq, duracao, cor, mudo=mudo, volume=vol, pasta_fim=pasta_fim))
+            _, nome, arq, cor, mudo, pasta_fim, vol, _chave = f
+            blocos.append(faixa_rpp(nome, arq, duracao, cor, mudo=mudo, volume=vol, pasta_fim=pasta_fim,
+                                    base=pasta))
 
     rpp = f"""<REAPER_PROJECT 0.1 "7.0" 0
   TEMPO {bpm} 4 4
@@ -318,7 +353,7 @@ def montar_rpp(pasta, titulo, faixas, bpm, duracao):
 # ---------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description="Cria VS a partir de link do YouTube ou arquivo de áudio")
-    ap.add_argument("entrada", help="link do YouTube ou caminho de um MP3/WAV")
+    ap.add_argument("entrada", nargs="?", help="link do YouTube ou caminho de um MP3/WAV")
     ap.add_argument("--bpm", type=float, help="força o BPM do click")
     ap.add_argument("--compasso", type=int, default=4, help="batidas por compasso (padrão 4)")
     ap.add_argument("--resultado", help="(uso interno do Reaper) arquivo onde gravar o resultado")
@@ -327,8 +362,21 @@ def main():
                     help="vs = instrumentos separados | playback = só tira a voz")
     ap.add_argument("--tom", type=int, default=0, choices=range(-12, 13), metavar="[-12..12]",
                     help="muda o tom em semitons (bateria e percussão não mudam)")
+    ap.add_argument("--retom", metavar="PASTA",
+                    help="(uso interno do Reaper) refaz só o tom de uma música já separada")
     args = ap.parse_args()
     print(f"PID:{os.getpid()}", flush=True)
+
+    if args.retom:  # mudar o tom depois: usa as partes já separadas, a IA não roda de novo
+        arquivos, mp3 = aplicar_tom_pasta(Path(args.retom), args.tom)
+        if args.resultado:
+            linhas = [f"TOM\t{args.tom}"] + ([f"MP3\t{mp3}"] if mp3 else [])
+            linhas += [f"ARQ\t{k}\t{v}" for k, v in arquivos.items()]
+            Path(args.resultado).write_text("\n".join(linhas + ["FIM"]) + "\n", encoding="utf-8")
+        log("PRONTO!")
+        return
+    if not args.entrada:
+        ap.error("informe o link ou o arquivo da música")
 
     import licenca
     log("Verificando licença...")
@@ -349,8 +397,6 @@ def main():
             sys.exit(f"Arquivo não encontrado: {origem}")
         titulo = origem.stem
 
-    if args.tom:
-        titulo = f"{titulo} (Tom {args.tom:+d})"
     sufixo = " (Playback)" if args.modo == "playback" else ""
     pasta = SAIDA / (nome_seguro(titulo) + sufixo)
     pasta.mkdir(parents=True, exist_ok=True)
@@ -359,19 +405,15 @@ def main():
     para_wav(origem, wav_original)
     duracao = sf.info(str(wav_original)).duration
 
-    arquivos = separar(wav_original, pasta, args.modo, args.tom)
+    arquivos = separar(wav_original, pasta, args.modo)
     arquivos["original"] = wav_original
-    if args.tom:
-        aplicar_tom(pasta, arquivos, args.modo, args.tom)
 
     arquivos["click"] = pasta / "click.wav"
     bpm, primeira = gerar_click(arquivos["drums"], wav_original, arquivos["click"], args.bpm, args.compasso)
 
-    mp3 = None
-    if args.modo == "playback":
-        arquivos.pop("drums").unlink(missing_ok=True)  # só servia para achar o BPM
-        mp3 = pasta / f"{nome_seguro(titulo)} - Playback.mp3"
-        exportar_mp3(arquivos["playback"], mp3)
+    # partes no tom original ficam registradas; o tom escolhido (se houver) vai para a subpasta 'Tom +N'
+    salvar_info(pasta, titulo, args.modo, arquivos)
+    arquivos, mp3 = aplicar_tom_pasta(pasta, args.tom)
 
     faixas = layout(args.modo, titulo, arquivos)
     rpp = montar_rpp(pasta, titulo + sufixo, faixas, bpm, duracao)
@@ -384,7 +426,8 @@ def main():
             pass
 
     if args.resultado:
-        escrever_resultado(args.resultado, titulo, bpm, primeira, duracao, faixas, rpp, args.modo, mp3)
+        escrever_resultado(args.resultado, titulo, bpm, primeira, duracao, faixas, rpp, args.modo, mp3,
+                           pasta, args.tom)
 
     log("PRONTO!")
     print(f"   Modo   : {'Playback (sem voz)' if args.modo == 'playback' else 'VS (instrumentos separados)'}")
@@ -416,19 +459,20 @@ def abrir_no_reaper(rpp):
         print(f"   Não consegui abrir sozinho ({e}). Abra o arquivo .RPP acima.")
 
 
-def escrever_resultado(caminho, titulo, bpm, primeira, duracao, faixas, rpp, modo, mp3):
+def escrever_resultado(caminho, titulo, bpm, primeira, duracao, faixas, rpp, modo, mp3, pasta=None, tom=0):
     """Arquivo simples (separado por TAB) que o script Lua do Reaper lê para montar as faixas.
-    TRACK  nome  arquivo  r  g  b  mudo  profundidade_pasta  volume  |  FOLDER  nome  r  g  b"""
+    TRACK  nome  arquivo  r  g  b  mudo  profundidade_pasta  volume  chave
+    FOLDER  nome  r  g  b  chave  mudo"""
     linhas = [f"TITULO\t{titulo}", f"MODO\t{modo}", f"BPM\t{bpm}", f"PRIMEIRA\t{primeira:.4f}",
-              f"DURACAO\t{duracao:.6f}", f"RPP\t{rpp}"]
+              f"DURACAO\t{duracao:.6f}", f"RPP\t{rpp}", f"PASTA\t{pasta}", f"TOM\t{tom}"]
     if mp3:
         linhas.append(f"MP3\t{mp3}")
     for f in faixas:
         if f[0] == "FOLDER":
-            linhas.append(f"FOLDER\t{f[1]}\t{f[2][0]}\t{f[2][1]}\t{f[2][2]}")
+            linhas.append(f"FOLDER\t{f[1]}\t{f[2][0]}\t{f[2][1]}\t{f[2][2]}\t{f[3]}\t{f[4]}")
         else:
-            _, nome, arq, cor, mudo, pasta, vol = f
-            linhas.append(f"TRACK\t{nome}\t{arq}\t{cor[0]}\t{cor[1]}\t{cor[2]}\t{mudo}\t{pasta}\t{vol}")
+            _, nome, arq, cor, mudo, prof, vol, chave = f
+            linhas.append(f"TRACK\t{nome}\t{arq}\t{cor[0]}\t{cor[1]}\t{cor[2]}\t{mudo}\t{prof}\t{vol}\t{chave}")
     linhas.append("FIM")
     Path(caminho).write_text("\n".join(linhas) + "\n", encoding="utf-8")
 

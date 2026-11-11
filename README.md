@@ -5,7 +5,9 @@ a IA separa os instrumentos e o projeto abre pronto no REAPER.
 
 - **VS**: bateria, baixo, guitarra/violão, teclado/piano, outros + click + guias (original e voz).
 - **Playback**: só tira a voz e já exporta MP3 320k.
-- **Tom**: -12 a +12 semitons sem mexer na bateria e percussão.
+- **Tom**: -12 a +12 semitons sem mexer na bateria e percussão. Dá para escolher antes ou, depois de
+  separar, ouvir ao vivo no REAPER e confirmar (o motor refaz só o tom com `--retom`, sem rodar a IA de novo;
+  cada tom confirmado fica na subpasta `Tom +N` da música).
 - **BPM**: detectado sozinho (ou informado) e click alinhado às batidas.
 
 ## Estrutura

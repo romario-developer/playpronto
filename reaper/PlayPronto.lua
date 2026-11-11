@@ -314,6 +314,9 @@ local function ler_resultado(txt)
     elseif c[1] == "TITULO" then d.titulo = c[2]
     elseif c[1] == "RPP" then d.rpp = c[2]
     elseif c[1] == "MP3" then d.mp3 = c[2]
+    elseif c[1] == "MODO" then d.modo = c[2]
+    elseif c[1] == "PASTA" then d.pasta = c[2]
+    elseif c[1] == "TOM" then d.tom = tonumber(c[2]) or 0
     elseif c[1] == "TRACK" or c[1] == "FOLDER" then d.tracks[#d.tracks + 1] = c end
   end
   return d
@@ -323,9 +326,35 @@ local function projeto_vazio()
   return reaper.CountTracks(0) == 0 and reaper.IsProjectDirty(0) == 0
 end
 
+local function norm(p) return (p or ""):lower():gsub("/", "\\") end
+
+-- acha no projeto aberto as faixas desta música (pelo arquivo de cada item e pelo nome das pastas)
+local function coletar_faixas(d)
+  local por_arq, por_nome, lista = {}, {}, {}
+  for _, c in ipairs(d.tracks) do
+    if c[1] == "TRACK" and c[10] then por_arq[norm(c[3])] = c[10]
+    elseif c[1] == "FOLDER" and c[6] then por_nome[c[2]] = c[6] end
+  end
+  for i = 0, reaper.CountTracks(0) - 1 do
+    local tr = reaper.GetTrack(0, i)
+    local _, nome = reaper.GetTrackName(tr)
+    if por_nome[nome] then lista[#lista + 1] = { tr = tr, chave = por_nome[nome] } end
+    for j = 0, reaper.CountTrackMediaItems(tr) - 1 do
+      local take = reaper.GetActiveTake(reaper.GetTrackMediaItem(tr, j))
+      if take then
+        local fn = reaper.GetMediaSourceFileName(reaper.GetMediaItemTake_Source(take), "")
+        local chave = por_arq[norm(fn)]
+        if chave then lista[#lista + 1] = { tr = tr, take = take, chave = chave } end
+      end
+    end
+  end
+  return lista
+end
+
 local function abrir_em_aba(d)
   if not projeto_vazio() then reaper.Main_OnCommand(40859, 0) end -- nova aba de projeto
   reaper.Main_openProject("noprompt:" .. d.rpp)
+  return coletar_faixas(d)
 end
 
 local function inserir_no_cursor(d, pos)
@@ -333,6 +362,7 @@ local function inserir_no_cursor(d, pos)
   reaper.PreventUIRefresh(1)
   if d.bpm and d.bpm > 0 then reaper.SetTempoTimeSigMarker(0, -1, pos, -1, -1, d.bpm, 4, 4, false) end
   local idx = reaper.CountTracks(0)
+  local lista = {}
   for _, c in ipairs(d.tracks) do
     reaper.InsertTrackAtIndex(idx, true)
     local tr = reaper.GetTrack(0, idx); idx = idx + 1
@@ -340,6 +370,11 @@ local function inserir_no_cursor(d, pos)
     if c[1] == "FOLDER" then
       reaper.SetMediaTrackInfo_Value(tr, "I_CUSTOMCOLOR", cor(tonumber(c[3]), tonumber(c[4]), tonumber(c[5])))
       reaper.SetMediaTrackInfo_Value(tr, "I_FOLDERDEPTH", 1)
+      if c[7] == "1" then
+        reaper.SetMediaTrackInfo_Value(tr, "B_MUTE", 1)
+        reaper.SetMediaTrackInfo_Value(tr, "I_FOLDERCOMPACT", 2) -- pasta fechada
+      end
+      if c[6] then lista[#lista + 1] = { tr = tr, chave = c[6] } end
     else
       reaper.SetMediaTrackInfo_Value(tr, "I_CUSTOMCOLOR", cor(tonumber(c[4]), tonumber(c[5]), tonumber(c[6])))
       reaper.SetMediaTrackInfo_Value(tr, "B_MUTE", tonumber(c[7]))
@@ -353,6 +388,7 @@ local function inserir_no_cursor(d, pos)
         reaper.SetMediaItemInfo_Value(item, "D_POSITION", pos)
         reaper.SetMediaItemInfo_Value(item, "D_LENGTH", reaper.GetMediaSourceLength(src))
         reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", c[2], true)
+        if c[10] then lista[#lista + 1] = { tr = tr, take = take, chave = c[10] } end
       end
     end
   end
@@ -362,17 +398,125 @@ local function inserir_no_cursor(d, pos)
   reaper.UpdateArrange()
   reaper.Main_OnCommand(40047, 0) -- gera waveforms
   reaper.Undo_EndBlock(NOME .. ": " .. (d.titulo or ""), -1)
+  return lista
+end
+
+------------------------------------------------------------------ tom ao vivo (depois de separar)
+-- estas mudam de tom; bateria, outros (percussão) e click ficam iguais
+local MUDA_TOM = { bass = true, guitar = true, piano = true, other = true, vocals = true, original = true }
+
+local function ctx_valido()
+  local C = E.ctx
+  if not C or C.invalido then return false end
+  for _, f in ipairs(C.faixas) do
+    if not reaper.ValidatePtr2(C.proj, f.tr, "MediaTrack*") or
+       (f.take and not reaper.ValidatePtr2(C.proj, f.take, "MediaItem_Take*")) then
+      C.invalido = true
+      return false
+    end
+  end
+  return true
+end
+
+-- ouve o tom n na hora: o Reaper muda o tom das faixas melódicas sem parar de tocar
+local function previa_tom(n)
+  local C = E.ctx
+  if not ctx_valido() or E.retom then return end
+  C.prev = limitar(math.floor(n), -12, 12)
+  local delta = C.prev - C.base
+  reaper.PreventUIRefresh(1)
+  for _, f in ipairs(C.faixas) do
+    if f.take and MUDA_TOM[f.chave] then reaper.SetMediaItemTakeInfo_Value(f.take, "D_PITCH", delta) end
+    -- playback: enquanto ouve um tom não confirmado, toca as partes (bateria fica igual) no lugar do playback
+    if C.modo == "playback" and not f.take then
+      if f.chave == "partes" then reaper.SetMediaTrackInfo_Value(f.tr, "B_MUTE", delta ~= 0 and 0 or 1) end
+    end
+    if C.modo == "playback" and f.chave == "playback" then
+      reaper.SetMediaTrackInfo_Value(f.tr, "B_MUTE", delta ~= 0 and 1 or 0)
+    end
+  end
+  reaper.PreventUIRefresh(-1)
+  reaper.UpdateArrange()
+end
+
+-- confirmar: o motor refaz o tom com qualidade máxima a partir das partes já separadas (a IA não roda)
+local function confirmar_tom()
+  local C = E.ctx
+  if not ctx_valido() or E.retom then return end
+  reaper.RecursiveCreateDirectory(TMP, 0)
+  local id = os.date("%H%M%S") .. "_" .. math.random(1000, 9999)
+  local res, log = TMP .. "\\retom_" .. id .. ".txt", TMP .. "\\retom_" .. id .. "_log.txt"
+  rodar_escondido(aspas(SCRIPT) .. " --retom " .. aspas(C.pasta) .. " --tom " .. C.prev ..
+                  " --resultado " .. aspas(res), res, log)
+  E.retom = { res = res, log = log, inicio = reaper.time_precise(), tom = C.prev, etapa = "Começando..." }
+  C.erro = nil
+end
+
+local function verificar_retom()
+  local R, C = E.retom, E.ctx
+  if not R then return end
+  local log = ler(R.log)
+  if log then for e in log:gmatch(">> ([^\r\n]+)") do R.etapa = e end end
+  local txt = ler(R.res)
+  if txt and txt:find("^ERRO") then
+    E.retom = nil
+    C.erro = txt:match("^ERRO\t([^\r\n]*)") or "erro desconhecido"
+    os.remove(R.res); return
+  end
+  if not (txt and txt:find("\nFIM")) then
+    if reaper.time_precise() - R.inicio > 900 then E.retom = nil; C.erro = "Demorou demais para mudar o tom." end
+    return
+  end
+  os.remove(R.res); os.remove(R.log)
+  E.retom = nil
+  local novos = {}
+  for linha in txt:gmatch("[^\r\n]+") do
+    local k, v = linha:match("^ARQ\t([^\t]+)\t(.+)$")
+    if k then novos[k] = v end
+    local m = linha:match("^MP3\t(.+)$")
+    if m then E.mp3 = m end
+  end
+  if not ctx_valido() then return end
+  reaper.Undo_BeginBlock()
+  reaper.PreventUIRefresh(1)
+  for _, f in ipairs(C.faixas) do
+    local novo = f.take and novos[f.chave]
+    if novo then
+      local atual = reaper.GetMediaSourceFileName(reaper.GetMediaItemTake_Source(f.take), "")
+      if norm(atual) ~= norm(novo) then
+        local src = reaper.PCM_Source_CreateFromFile(novo)
+        if src then reaper.SetMediaItemTake_Source(f.take, src) end
+      end
+      if MUDA_TOM[f.chave] then reaper.SetMediaItemTakeInfo_Value(f.take, "D_PITCH", 0) end
+    end
+    if C.modo == "playback" and not f.take and f.chave == "partes" then
+      reaper.SetMediaTrackInfo_Value(f.tr, "B_MUTE", 1)
+    end
+    if C.modo == "playback" and f.chave == "playback" then reaper.SetMediaTrackInfo_Value(f.tr, "B_MUTE", 0) end
+  end
+  C.base, C.prev = R.tom, R.tom
+  reaper.PreventUIRefresh(-1)
+  reaper.Main_OnCommand(40047, 0) -- gera waveforms
+  reaper.UpdateArrange()
+  reaper.Undo_EndBlock(NOME .. ": tom " .. (R.tom == 0 and "original" or string.format("%+d", R.tom)), -1)
+  C.ok = true
 end
 
 local function concluir(txt)
   local d = ler_resultado(txt)
-  if E.modo == "aba" and d.rpp and existe(d.rpp) then abrir_em_aba(d)
-  else inserir_no_cursor(d, E.posicao) end
+  local faixas
+  if E.modo == "aba" and d.rpp and existe(d.rpp) then faixas = abrir_em_aba(d)
+  else faixas = inserir_no_cursor(d, E.posicao) end
   os.remove(E.res)
   E.titulo = d.titulo or ""
   E.mp3 = d.mp3
+  E.ctx = nil
+  if d.pasta and faixas and #faixas > 0 then
+    E.ctx = { proj = reaper.EnumProjects(-1), modo = d.modo or E.tipo, pasta = d.pasta,
+              base = d.tom or 0, prev = d.tom or 0, faixas = faixas }
+  end
   if d.mp3 then
-    E.msg = "Playback sem voz no Reaper + MP3 salvo na pasta"
+    E.msg = "Playback no Reaper + MP3 salvo na pasta"
   else
     E.msg = "BPM " .. (d.bpm or "?") .. "  •  guias Original e Voz entraram mutadas"
   end
@@ -940,15 +1084,86 @@ local function tela_processando()
   if botao("Cancelar", W - 140, 200, 120, 32) then cancelar() end
 end
 
-local function tela_pronto()
-  cabecalho("Playback pronto!")
-  fonte(2); texto(E.titulo:sub(1, 40), 20, 96, 120, 220, 120)
-  fonte(3); texto(E.msg, 20, 126, 170, 170, 180)
-  if E.mp3 and botao("Abrir pasta do MP3", 20, 160, W - 40, 34) then
-    reaper.ExecProcess('explorer.exe /select,"' .. E.mp3 .. '"', -1)
+local function fmt_tom(n) return n == 0 and "0" or ((n > 0 and "+" or "−") .. math.abs(n)) end
+
+-- caixa "Tom" da tela Pronto: ouvir ao vivo e confirmar
+local function caixa_tom(y)
+  local C = E.ctx
+  local c = COR.tom
+  local bx, bw, bh = 20, W - 40, 114
+  rgbc(mix(c, 0.35)); caixa(bx, y, bw, bh, 10, true)
+  rgbc(mix(c, 0.07)); caixa(bx + 1.5, y + 1.5, bw - 3, bh - 3, 9, true)
+  fonte(2); texto("Tom", bx + 14, y + 10, 220, 240, 190)
+
+  if not ctx_valido() then
+    fonte(3)
+    texto_quebrado("O projeto desta música foi fechado. Para mudar o tom, abra o PlayPronto logo depois de criar.",
+      bx + 14, y + 40, bw - 28, 150, 150, 160, 18)
+    return
   end
-  if botao("Criar outro", 20, 250, 200, 38, true) then E.tela = "inicio" end
-  if botao("Fechar", W - 140, 250, 120, 38) then gfx.quit(); janela = false end
+  local ocupado = E.retom ~= nil
+  if segmento("Original", bx + bw - 104, y + 8, 90, 24, C.prev == 0) and not ocupado then previa_tom(0) end
+  if botao("−", bx + 14, y + 36, 40, 40, false, false, 1) and not ocupado then previa_tom(C.prev - 1) end
+  if botao("+", bx + bw - 54, y + 36, 40, 40, false, false, 1) and not ocupado then previa_tom(C.prev + 1) end
+  fonte(1)
+  local s = fmt_tom(C.prev)
+  local tw = gfx.measurestr(s)
+  if C.prev == 0 then rgb(255, 255, 255) else rgbc(mix(c, 0.5, { 255, 255, 255 })) end
+  gfx.x, gfx.y = bx + (bw - tw) / 2, y + 34; gfx.drawstr(s)
+  fonte(3)
+  local d = tom_desc(C.prev)
+  tw = gfx.measurestr(d); texto(d, bx + (bw - tw) / 2, y + 64, 190, 190, 198)
+  local dica = "Dê play no Reaper e ajuste ouvindo. A bateria não muda."
+  tw = gfx.measurestr(dica); texto(dica, bx + (bw - tw) / 2, y + 88, 130, 130, 140)
+
+  if not ocupado then
+    if roda ~= 0 then previa_tom(C.prev + (roda > 0 and 1 or -1)) end
+    if tecla == 30064 or tecla == 1919379572 then previa_tom(C.prev + 1)
+    elseif tecla == 1685026670 or tecla == 1818584692 then previa_tom(C.prev - 1) end
+  end
+end
+
+local function tela_pronto()
+  local C = E.ctx
+  cabecalho(E.mp3 and "Playback pronto!" or "VS pronto!")
+  fonte(2); texto(E.titulo:sub(1, 42), 20, 76, 120, 220, 120)
+  fonte(3); texto(E.msg, 20, 100, 170, 170, 180)
+
+  local y = 246
+  if C then
+    caixa_tom(124)
+    fonte(3)
+    if E.retom then -- aplicando o tom
+      local bw = W - 40
+      rgb(50, 50, 58); caixa(20, y + 4, bw, 10, 5, true)
+      local t = (reaper.time_precise() * 0.5) % 1
+      rgbc(table.unpack(COR.tom)); caixa(20 + (bw - 80) * t, y + 4, 80, 10, 5, true)
+      texto((E.retom.etapa or "Aplicando o tom..."):sub(1, 60), 20, y + 18, 220, 240, 190)
+    elseif C.erro then
+      texto(("Não deu para mudar o tom: " .. C.erro):sub(1, 64), 20, y + 8, 240, 130, 120)
+      if botao("Tentar de novo", W - 150, y, 130, 30) then confirmar_tom() end
+    elseif ctx_valido() and C.prev ~= C.base then
+      if botao("Confirmar tom " .. fmt_tom(C.prev), 20, y, W - 40, 32, true) then confirmar_tom() end
+    elseif ctx_valido() then
+      local s = C.base == 0 and "As faixas estão no tom original." or
+        ("✓ Tom " .. fmt_tom(C.base) .. " aplicado nas faixas" .. (E.mp3 and " e no MP3." or "."))
+      texto(s, 20, y + 8, 150, 200, 150)
+    end
+  else
+    if E.mp3 then y = 140 end
+  end
+
+  local by = 288
+  local largura = E.mp3 and (W - 60) / 3 or (W - 50) / 2
+  if botao("Criar outro", 20, by, largura, 30, not (C and C.prev ~= C.base)) then E.tela = "inicio" end
+  local x = 30 + largura
+  if E.mp3 then
+    if botao("Pasta do MP3", x, by, largura, 30) then
+      reaper.ExecProcess('explorer.exe /select,"' .. E.mp3 .. '"', -1)
+    end
+    x = x + largura + 10
+  end
+  if botao("Fechar", x, by, largura, 30) then gfx.quit(); janela = false end
 end
 
 local function tela_erro()
@@ -966,6 +1181,7 @@ local function loop()
   if reaper.time_precise() - ultimo > 0.5 then
     ultimo = reaper.time_precise()
     if E.tela == "processando" then verificar() end
+    if E.retom then verificar_retom() end
     verificar_licenca()
   end
 
@@ -996,7 +1212,7 @@ local function loop()
     end
   end
 
-  if janela or E.tela == "processando" or E.lic_job then reaper.defer(loop) end
+  if janela or E.tela == "processando" or E.lic_job or E.retom then reaper.defer(loop) end
 end
 
 gfx.init(NOME, W, H, 0, 300, 200)
