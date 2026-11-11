@@ -468,19 +468,54 @@ local function botao(rot, x, y, w, h, principal, destaque, fnt)
 end
 
 -- cartão de escolha (VS / Playback)
-local function cartao(tit, sub, x, y, w, h, marcado)
+-- paleta da tela inicial (combina com o laranja do botão principal)
+local COR = {
+  vs       = { 80, 160, 255 },  -- azul
+  playback = { 244, 114, 182 }, -- rosa
+  arquivo  = { 45, 212, 191 },  -- verde-água
+  bpm      = { 167, 139, 250 }, -- violeta
+  tom      = { 163, 230, 53 },  -- verde-limão
+  laranja  = { 245, 170, 35 },
+}
+local FUNDO = { 34, 34, 40 }
+
+-- mistura a cor com o fundo escuro (t = quanto da cor entra)
+local function mix(c, t, base)
+  base = base or FUNDO
+  return base[1] + (c[1] - base[1]) * t, base[2] + (c[2] - base[2]) * t, base[3] + (c[3] - base[3]) * t
+end
+local function rgbc(r, g, b) gfx.set(r / 255, g / 255, b / 255, 1) end
+
+-- botão colorido: fundo tingido, borda e texto na cor; "ligado" = preenchimento mais forte
+local function botao_cor(rot, x, y, w, h, c, ligado)
   local sobre = em(x, y, w, h)
-  if marcado then rgb(245, 170, 35) else rgb(70, 70, 80) end
+  local apertado = sobre and (gfx.mouse_cap & 1) == 1
+  rgbc(mix(c, ligado and 0.95 or (sobre and 0.75 or 0.45)))
+  caixa(x, y, w, h, 8, true)
+  local t = ligado and 0.38 or (apertado and 0.10 or (sobre and 0.24 or 0.16))
+  rgbc(mix(c, t)); caixa(x + 1.5, y + 1.5, w - 3, h - 3, 7, true)
+  fonte(3)
+  local tw, th = gfx.measurestr(rot)
+  if ligado then rgbc(255, 255, 255) else rgbc(mix(c, 0.55, { 255, 255, 255 })) end
+  gfx.x, gfx.y = x + (w - tw) / 2, y + (h - th) / 2; gfx.drawstr(rot)
+  return sobre and clique
+end
+
+local function cartao(tit, sub, x, y, w, h, marcado, c)
+  c = c or COR.laranja
+  local sobre = em(x, y, w, h)
+  rgbc(mix(c, marcado and 1 or (sobre and 0.6 or 0.3)))
   caixa(x, y, w, h, 10, true)
-  if marcado then rgb(60, 45, 25) elseif sobre then rgb(55, 55, 63) else rgb(42, 42, 48) end
+  rgbc(mix(c, marcado and 0.30 or (sobre and 0.16 or 0.09)))
   caixa(x + 2, y + 2, w - 4, h - 4, 9, true)
   fonte(2)
   local tw = gfx.measurestr(tit)
-  if marcado then rgb(255, 200, 90) else rgb(230, 230, 235) end
+  if marcado then rgbc(mix(c, 0.35, { 255, 255, 255 })) else rgbc(mix(c, 0.5, { 200, 200, 208 })) end
   gfx.x, gfx.y = x + (w - tw) / 2, y + 9; gfx.drawstr(tit)
   fonte(3)
   tw = gfx.measurestr(sub)
-  rgb(170, 170, 180); gfx.x, gfx.y = x + (w - tw) / 2, y + 31; gfx.drawstr(sub)
+  if marcado then rgbc(mix(c, 0.25, { 235, 235, 240 })) else rgb(150, 150, 160) end
+  gfx.x, gfx.y = x + (w - tw) / 2, y + 31; gfx.drawstr(sub)
   return sobre and clique
 end
 
@@ -854,9 +889,9 @@ local function tela_inicio()
   cabecalho("Playback e VS com IA direto no Reaper")
   selo_licenca()
   local cw = (W - 50) / 2
-  if cartao("VS", "instrumentos separados", 20, 78, cw, 54, E.tipo == "vs") then
+  if cartao("VS", "instrumentos separados", 20, 78, cw, 54, E.tipo == "vs", COR.vs) then
     E.tipo = "vs"; set_cfg("tipo", "vs") end
-  if cartao("Playback", "só tira a voz", 30 + cw, 78, cw, 54, E.tipo == "playback") then
+  if cartao("Playback", "só tira a voz", 30 + cw, 78, cw, 54, E.tipo == "playback", COR.playback) then
     E.tipo = "playback"; set_cfg("tipo", "playback") end
   local copiado = link_copiado()
   if botao(copiado and "Criar com o link copiado" or "Colar link do YouTube", 20, 146, W - 40, 46, true) then
@@ -871,18 +906,20 @@ local function tela_inicio()
     texto("Copie o link no YouTube (Ctrl+C) e ele aparece aqui", 22, 194, 120, 120, 130)
   end
   local bw3 = (W - 60) / 3
-  if botao("Arquivo do PC", 20, 220, bw3, 34) then escolher_arquivo() end
+  if botao_cor("Arquivo do PC", 20, 220, bw3, 34, COR.arquivo) then escolher_arquivo() end
   local bl = E.bpm == "" and "BPM: auto" or ("BPM: " .. E.bpm)
-  if botao(bl, 30 + bw3, 220, bw3, 34, false, E.bpm ~= "") then abrir_painel("bpm") end
-  if botao("Tom: " .. tom_txt(), 40 + bw3 * 2, 220, bw3, 34, false, E.tom ~= 0) then abrir_painel("tom") end
+  if botao_cor(bl, 30 + bw3, 220, bw3, 34, COR.bpm, E.bpm ~= "") then abrir_painel("bpm") end
+  if botao_cor("Tom: " .. tom_txt(), 40 + bw3 * 2, 220, bw3, 34, COR.tom, E.tom ~= 0) then abrir_painel("tom") end
   -- roda do mouse em cima dos botões ajusta direto
   if roda ~= 0 and em(30 + bw3, 220, bw3, 34) then passo_bpm(roda > 0 and 1 or -1) end
   if roda ~= 0 and em(40 + bw3 * 2, 220, bw3, 34) then set_tom(E.tom + (roda > 0 and 1 or -1)) end
   -- onde abrir
   fonte(3); texto("Quando terminar:", 20, 266, 160, 160, 170)
-  if botao((E.modo == "aba" and "● " or "○ ") .. "Abrir em nova aba", 20, 286, 196, 26) then
+  if botao_cor((E.modo == "aba" and "● " or "○ ") .. "Abrir em nova aba", 20, 286, 196, 26,
+               E.modo == "aba" and COR.laranja or { 120, 120, 132 }) then
     E.modo = "aba"; set_cfg("modo", "aba") end
-  if botao((E.modo == "atual" and "● " or "○ ") .. "Pôr no cursor (setlist)", 224, 286, 196, 26) then
+  if botao_cor((E.modo == "atual" and "● " or "○ ") .. "Pôr no cursor (setlist)", 224, 286, 196, 26,
+               E.modo == "atual" and COR.laranja or { 120, 120, 132 }) then
     E.modo = "atual"; set_cfg("modo", "atual") end
 end
 
