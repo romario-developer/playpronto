@@ -213,23 +213,57 @@ local function escolher_arquivo()
   if ok then iniciar(f) end
 end
 
-local function mudar_bpm()
-  local ok, r = reaper.GetUserInputs(NOME, 1, "BPM (vazio = detectar sozinho):", E.bpm)
-  if not ok then return end
-  r = trim(r)
-  if r == "" or tonumber(r) then E.bpm = r
-  else reaper.ShowMessageBox("BPM inválido: " .. r, NOME, 0) end
+------------------------------------------------------------------ BPM e tom (ajustados dentro da janela)
+local BPM_MIN, BPM_MAX = 40, 240
+local taps = {}
+
+local function limitar(n, a, b) return math.max(a, math.min(b, n)) end
+
+local function set_bpm(n)
+  if not n then E.bpm = ""; return end
+  E.bpm = tostring(limitar(math.floor(n + 0.5), BPM_MIN, BPM_MAX))
 end
 
-local function tom_txt() return E.tom == 0 and "0" or string.format("%+d", E.tom) end
+-- +/- partindo do "auto" começa em 120
+local function passo_bpm(d)
+  local n = tonumber(E.bpm)
+  set_bpm(n and (n + d) or 120)
+end
 
-local function mudar_tom()
-  local ok, r = reaper.GetUserInputs(NOME, 1,
-    "Tom em semitons (-12 a +12; 0 = original):,extrawidth=60", tom_txt())
-  if not ok then return end
-  local n = tonumber((trim(r):gsub("^%+", "")))
-  if n and n == math.floor(n) and n >= -12 and n <= 12 then E.tom = math.floor(n)
-  else reaper.ShowMessageBox("Tom inválido: " .. r .. "\nUse um número inteiro de -12 a +12.", NOME, 0) end
+-- número digitado no painel de BPM
+local function bpm_confirmar()
+  if E.bpm_buf then
+    local n = tonumber(E.bpm_buf)
+    if n then set_bpm(n) end
+    E.bpm_buf = nil
+  end
+end
+
+-- toque no ritmo: média dos últimos toques
+local function tap()
+  local t = reaper.time_precise()
+  if #taps > 0 and t - taps[#taps] > 2 then taps = {} end
+  taps[#taps + 1] = t
+  if #taps > 8 then table.remove(taps, 1) end
+  if #taps >= 2 then set_bpm(60 / ((taps[#taps] - taps[1]) / (#taps - 1))) end
+end
+
+local function set_tom(n) E.tom = limitar(math.floor(n), -12, 12) end
+
+local function tom_txt() return E.tom == 0 and "0" or (E.tom > 0 and "+" or "−") .. math.abs(E.tom) end
+
+local function tom_desc(n)
+  if n == 0 then return "Tom original da música" end
+  local a = math.abs(n)
+  local semi = a == 1 and "1 semitom" or (a .. " semitons")
+  local extra
+  if a == 12 then extra = "1 oitava"
+  elseif a == 1 then extra = "meio tom"
+  else
+    local t = a // 2
+    extra = (t == 1 and "1 tom" or (t .. " tons")) .. (a % 2 == 1 and " e meio" or "")
+  end
+  return semi .. (n > 0 and " acima" or " abaixo") .. "  (" .. extra .. ")"
 end
 
 local function cancelar()
@@ -354,7 +388,14 @@ end
 ------------------------------------------------------------------ desenho
 local W, H = 440, 326
 local mouse_antes = 0
-local clique = false
+local clique = false      -- soltou o botão neste quadro
+local apertou = false     -- apertou o botão neste quadro
+local trava = false       -- tela de trás de um painel: não responde ao mouse
+local tecla, roda = 0, 0
+
+local function em(x, y, w, h)
+  return not trava and gfx.mouse_x >= x and gfx.mouse_x <= x + w and gfx.mouse_y >= y and gfx.mouse_y <= y + h
+end
 
 local function fonte(n) gfx.setfont(n) end
 local function rgb(r, g, b, a) gfx.set(r / 255, g / 255, b / 255, a or 1) end
@@ -375,8 +416,8 @@ local function caixa(x, y, w, h, raio, preenche)
 end
 
 -- botão: retorna true quando clicado
-local function botao(rot, x, y, w, h, principal, destaque)
-  local sobre = gfx.mouse_x >= x and gfx.mouse_x <= x + w and gfx.mouse_y >= y and gfx.mouse_y <= y + h
+local function botao(rot, x, y, w, h, principal, destaque, fnt)
+  local sobre = em(x, y, w, h)
   local apertado = sobre and (gfx.mouse_cap & 1) == 1
   if destaque and not principal then -- opção ligada (ex.: tom mudado): borda dourada
     rgb(245, 170, 35); caixa(x - 2, y - 2, w + 4, h + 4, 9, true)
@@ -387,7 +428,7 @@ local function botao(rot, x, y, w, h, principal, destaque)
     if apertado then rgb(45, 45, 52) elseif sobre then rgb(70, 70, 80) else rgb(55, 55, 63) end
   end
   caixa(x, y, w, h, 8, true)
-  fonte(principal and 2 or 3)
+  fonte(fnt or (principal and 2 or 3))
   local tw, th = gfx.measurestr(rot)
   if principal then rgb(35, 20, 5) else rgb(230, 230, 235) end
   gfx.x, gfx.y = x + (w - tw) / 2, y + (h - th) / 2
@@ -397,7 +438,7 @@ end
 
 -- cartão de escolha (VS / Playback)
 local function cartao(tit, sub, x, y, w, h, marcado)
-  local sobre = gfx.mouse_x >= x and gfx.mouse_x <= x + w and gfx.mouse_y >= y and gfx.mouse_y <= y + h
+  local sobre = em(x, y, w, h)
   if marcado then rgb(245, 170, 35) else rgb(70, 70, 80) end
   caixa(x, y, w, h, 10, true)
   if marcado then rgb(60, 45, 25) elseif sobre then rgb(55, 55, 63) else rgb(42, 42, 48) end
@@ -434,7 +475,7 @@ local function selo_licenca()
   local tw = gfx.measurestr(rot)
   local w, h = tw + 20, 24
   local x, y = W - 16 - w, 18
-  local sobre = gfx.mouse_x >= x and gfx.mouse_x <= x + w and gfx.mouse_y >= y and gfx.mouse_y <= y + h
+  local sobre = em(x, y, w, h)
   rgb(cor_f[1] + (sobre and 20 or 0), cor_f[2] + (sobre and 20 or 0), cor_f[3] + (sobre and 20 or 0))
   caixa(x, y, w, h, 11, true)
   rgb(cor_t[1], cor_t[2], cor_t[3]); gfx.x, gfx.y = x + 10, y + 4; gfx.drawstr(rot)
@@ -467,6 +508,139 @@ local function tela_licenca()
   if botao("Voltar", W - 140, 250, 120, 38) then E.tela = "inicio" end
 end
 
+------------------------------------------------------------------ painéis de BPM e tom
+local PX, PY, PW, PH = 16, 46, W - 32, 274
+
+local function abrir_painel(qual)
+  E.painel, E.bpm_buf, E.arrasta = qual, nil, false
+  taps = {}
+  clique = false -- o clique que abriu não vale dentro do painel
+end
+
+local function fechar_painel()
+  bpm_confirmar()
+  E.painel, E.arrasta = nil, false
+end
+
+-- botão de seleção (tipo aba): marcado fica laranja
+local function segmento(rot, x, y, w, h, marcado)
+  local sobre = em(x, y, w, h)
+  if marcado then rgb(245, 170, 35) elseif sobre then rgb(70, 70, 80) else rgb(48, 48, 56) end
+  caixa(x, y, w, h, 8, true)
+  fonte(3)
+  local tw, th = gfx.measurestr(rot)
+  if marcado then rgb(35, 20, 5) else rgb(200, 200, 208) end
+  gfx.x, gfx.y = x + (w - tw) / 2, y + (h - th) / 2; gfx.drawstr(rot)
+  return sobre and clique
+end
+
+local function centralizado(s, y, r, g, b)
+  local tw = gfx.measurestr(s)
+  texto(s, PX + (PW - tw) / 2, y, r, g, b)
+end
+
+local function moldura_painel(titulo)
+  rgb(0, 0, 0, 0.62); gfx.rect(0, 0, gfx.w, gfx.h, 1)
+  rgb(80, 80, 92); caixa(PX - 1, PY - 1, PW + 2, PH + 2, 12, true)
+  rgb(36, 36, 42); caixa(PX, PY, PW, PH, 12, true)
+  fonte(2); texto(titulo, PX + 18, PY + 14, 255, 255, 255)
+  if botao("×", PX + PW - 42, PY + 10, 30, 28, false, false, 2) then fechar_painel() end
+  if clique and not em(PX, PY, PW, PH) then fechar_painel() end -- clicou fora: fecha
+end
+
+local function painel_bpm()
+  moldura_painel("Andamento (BPM)")
+  local auto = E.bpm == "" and not E.bpm_buf
+  local sw = (PW - 46) / 2
+  if segmento("Detectar sozinho", PX + 18, PY + 46, sw, 32, auto) then E.bpm_buf = nil; set_bpm(nil) end
+  if segmento("Eu informo", PX + 28 + sw, PY + 46, sw, 32, not auto) and auto then set_bpm(120) end
+
+  -- −  número  +
+  local y = PY + 92
+  if botao("−", PX + 40, y, 46, 46, false, false, 1) then bpm_confirmar(); passo_bpm(-1) end
+  if botao("+", PX + PW - 86, y, 46, 46, false, false, 1) then bpm_confirmar(); passo_bpm(1) end
+  fonte(1)
+  if E.bpm_buf then centralizado(E.bpm_buf .. "_", y + 4, 255, 200, 90)
+  elseif auto then centralizado("auto", y + 4, 150, 150, 160)
+  else centralizado(E.bpm, y + 4, 255, 255, 255) end
+  fonte(3); centralizado("BPM", y + 32, 130, 130, 140)
+
+  -- metade, dobro, tap
+  y = PY + 152
+  if botao("÷2", PX + 18, y, 58, 32) then bpm_confirmar(); if tonumber(E.bpm) then set_bpm(tonumber(E.bpm) / 2) end end
+  if botao("×2", PX + 84, y, 58, 32) then bpm_confirmar(); if tonumber(E.bpm) then set_bpm(tonumber(E.bpm) * 2) end end
+  if botao(#taps > 0 and ("Tap  (" .. #taps .. ")") or "Tap: toque no ritmo", PX + 150, y, PW - 168, 32) then
+    bpm_confirmar(); tap()
+  end
+
+  fonte(3)
+  local dica = auto and "A IA acha o andamento e alinha o click nas batidas."
+    or "Digite o número, use a roda do mouse ou as setas."
+  centralizado(dica, PY + 194, 140, 140, 150)
+  if botao("Pronto", PX + 18, PY + PH - 48, PW - 36, 34, true) then fechar_painel() end
+
+  -- teclado e roda do mouse
+  if tecla >= 48 and tecla <= 57 then
+    E.bpm_buf = ((E.bpm_buf or "") .. string.char(tecla)):sub(1, 3)
+  elseif tecla == 8 and E.bpm_buf then E.bpm_buf = E.bpm_buf:sub(1, -2); if E.bpm_buf == "" then E.bpm_buf = nil end
+  elseif tecla == 13 then fechar_painel()
+  elseif tecla == 30064 then bpm_confirmar(); passo_bpm(1)       -- seta para cima
+  elseif tecla == 1685026670 then bpm_confirmar(); passo_bpm(-1) -- seta para baixo
+  end
+  if roda ~= 0 then bpm_confirmar(); passo_bpm(roda > 0 and 1 or -1) end
+end
+
+local function painel_tom()
+  moldura_painel("Mudar o tom")
+  local y = PY + 46
+  if botao("−", PX + 40, y, 46, 46, false, false, 1) then set_tom(E.tom - 1) end
+  if botao("+", PX + PW - 86, y, 46, 46, false, false, 1) then set_tom(E.tom + 1) end
+  fonte(1)
+  if E.tom == 0 then centralizado("0", y + 8, 255, 255, 255) else centralizado(tom_txt(), y + 8, 255, 200, 90) end
+  fonte(3); centralizado(tom_desc(E.tom), PY + 100, 190, 190, 198)
+
+  -- régua de -12 a +12 (clica ou arrasta)
+  local tx, tw, ty = PX + 30, PW - 60, PY + 134
+  local function xv(v) return tx + tw * (v + 12) / 24 end
+  if apertou and em(tx - 10, ty - 14, tw + 20, 28) then E.arrasta = true end
+  if E.arrasta then
+    if (gfx.mouse_cap & 1) == 1 then set_tom(math.floor((gfx.mouse_x - tx) / tw * 24 - 12 + 0.5))
+    else E.arrasta = false end
+  end
+  rgb(60, 60, 70); caixa(tx, ty - 3, tw, 6, 3, true)
+  rgb(245, 170, 35)
+  if E.tom ~= 0 then
+    local a, b = math.min(xv(0), xv(E.tom)), math.max(xv(0), xv(E.tom))
+    gfx.rect(a, ty - 3, b - a, 6, 1)
+  end
+  for v = -12, 12 do
+    if v % 12 == 0 then rgb(150, 150, 160) else rgb(85, 85, 96) end
+    gfx.line(xv(v), ty + 7, xv(v), ty + (v % 12 == 0 and 13 or 10))
+  end
+  rgb(255, 200, 90); gfx.circle(xv(E.tom), ty, 8, 1, 1)
+  rgb(36, 36, 42); gfx.circle(xv(E.tom), ty, 3, 1, 1)
+  fonte(3)
+  texto("-12", tx - 10, ty + 14, 120, 120, 130)
+  texto("0", xv(0) - 3, ty + 14, 120, 120, 130)
+  texto("+12", tx + tw - 14, ty + 14, 120, 120, 130)
+
+  -- atalhos
+  local rot = { { "−2", -2 }, { "−1", -1 }, { "Original", 0 }, { "+1", 1 }, { "+2", 2 } }
+  local bx, cw = PX + 18, (PW - 36 - 4 * 8) / 5
+  for i, r in ipairs(rot) do
+    if segmento(r[1], bx + (i - 1) * (cw + 8), PY + 172, cw, 28, E.tom == r[2]) then set_tom(r[2]) end
+  end
+
+  fonte(3); centralizado("Bateria e percussão continuam iguais.", PY + 208, 140, 140, 150)
+  if botao("Pronto", PX + 18, PY + PH - 48, PW - 36, 34, true) then fechar_painel() end
+
+  if tecla == 13 then fechar_painel()
+  elseif tecla == 30064 or tecla == 1919379572 then set_tom(E.tom + 1)        -- cima / direita
+  elseif tecla == 1685026670 or tecla == 1818584692 then set_tom(E.tom - 1)   -- baixo / esquerda
+  end
+  if roda ~= 0 then set_tom(E.tom + (roda > 0 and 1 or -1)) end
+end
+
 local function tela_inicio()
   cabecalho("Playback e VS com IA direto no Reaper")
   selo_licenca()
@@ -490,8 +664,11 @@ local function tela_inicio()
   local bw3 = (W - 60) / 3
   if botao("Arquivo do PC", 20, 220, bw3, 34) then escolher_arquivo() end
   local bl = E.bpm == "" and "BPM: auto" or ("BPM: " .. E.bpm)
-  if botao(bl, 30 + bw3, 220, bw3, 34) then mudar_bpm() end
-  if botao("Tom: " .. tom_txt(), 40 + bw3 * 2, 220, bw3, 34, false, E.tom ~= 0) then mudar_tom() end
+  if botao(bl, 30 + bw3, 220, bw3, 34, false, E.bpm ~= "") then abrir_painel("bpm") end
+  if botao("Tom: " .. tom_txt(), 40 + bw3 * 2, 220, bw3, 34, false, E.tom ~= 0) then abrir_painel("tom") end
+  -- roda do mouse em cima dos botões ajusta direto
+  if roda ~= 0 and em(30 + bw3, 220, bw3, 34) then passo_bpm(roda > 0 and 1 or -1) end
+  if roda ~= 0 and em(40 + bw3 * 2, 220, bw3, 34) then set_tom(E.tom + (roda > 0 and 1 or -1)) end
   -- onde abrir
   fonte(3); texto("Quando terminar:", 20, 266, 160, 160, 170)
   if botao((E.modo == "aba" and "● " or "○ ") .. "Abrir em nova aba", 20, 286, 196, 26) then
@@ -548,11 +725,21 @@ local function loop()
 
   if janela then
     local ch = gfx.getchar()
+    if ch == 27 and E.painel then fechar_painel(); ch = 0 end -- Esc fecha só o painel
     if ch < 0 or ch == 27 then gfx.quit(); janela = false
     else
       clique = (mouse_antes & 1) == 1 and (gfx.mouse_cap & 1) == 0 -- soltou o botão
+      apertou = (mouse_antes & 1) == 0 and (gfx.mouse_cap & 1) == 1
+      tecla = ch
+      roda = gfx.mouse_wheel or 0; gfx.mouse_wheel = 0
+      if E.tela ~= "inicio" then E.painel = nil end
       rgb(28, 28, 33); gfx.rect(0, 0, gfx.w, gfx.h, 1)
-      if E.tela == "inicio" then tela_inicio()
+      if E.tela == "inicio" then
+        local painel = E.painel
+        trava = painel ~= nil
+        tela_inicio()
+        trava = false
+        if painel == "bpm" then painel_bpm() elseif painel == "tom" then painel_tom() end
       elseif E.tela == "processando" then tela_processando()
       elseif E.tela == "pronto" then tela_pronto()
       elseif E.tela == "licenca" then tela_licenca()
