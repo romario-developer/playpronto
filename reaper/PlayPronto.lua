@@ -50,6 +50,7 @@ local E = {
   res = nil, log = nil, pid = nil, posicao = 0,
   lic = { tipo = "carregando" },  -- licenca | teste | sem_licenca | erro | carregando
   lic_job = nil,
+  chv = { raw = "" },       -- painel da chave: raw, estado (ativando|erro|ok|info), msg, nome
 }
 local janela = true
 local LICENCA_PY = PASTA_CRIADOR .. [[\licenca.py]]
@@ -103,40 +104,56 @@ local function verificar_licenca()
     t.restantes = tonumber(t.restantes)
     E.lic = t
   elseif j.acao == "ativar" then
+    E.painel = "chave" -- resultado aparece no painel, sem caixa do Windows
     if t.tipo == "ativada" then
-      reaper.ShowMessageBox("Licença ativada! Obrigado por comprar o PlayPronto." ..
-        ((t.nome or "") ~= "" and ("\n\nLicenciado para: " .. t.nome) or ""), NOME, 0)
+      E.chv.estado, E.chv.nome = "ok", t.nome or ""
       if E.tela == "licenca" then E.tela = "inicio" end
     else
-      reaper.ShowMessageBox("Não consegui ativar:\n\n" .. (t.msg or "erro desconhecido"), NOME, 0)
+      E.chv.estado, E.chv.msg = "erro", t.msg or "Erro desconhecido."
     end
     licenca("status")
   elseif j.acao == "desativar" then
-    reaper.ShowMessageBox(t.msg or "Pronto.", NOME, 0)
+    E.painel = "chave"
+    E.chv = { raw = "", estado = "info", msg = t.msg or "Este computador foi desativado." }
     licenca("status")
   end
 end
 
+-- chave digitada: só letras e números, até 20 (PLAY + 16)
+local function chave_limpa(s)
+  s = (s or ""):upper():gsub("[^A-Z0-9]", "")
+  if #s == 16 and s:sub(1, 4) ~= "PLAY" then s = "PLAY" .. s end
+  return s:sub(1, 20)
+end
+
+local function chave_fmt(raw)
+  local partes = {}
+  for i = 1, #raw, 4 do partes[#partes + 1] = raw:sub(i, i + 3) end
+  return table.concat(partes, "-")
+end
+
+local function chave_ok(raw) return #raw == 20 and raw:sub(1, 4) == "PLAY" end
+
+-- área de transferência: SWS se tiver; senão pergunta ao Windows
+local function ler_clipboard(rapido)
+  if reaper.CF_GetClipboard then return reaper.CF_GetClipboard("") end
+  if rapido then return "" end
+  local out = reaper.ExecProcess('powershell.exe -NoProfile -Command "Get-Clipboard"', 4000) or ""
+  return out:match("^%-?%d+\r?\n(.*)$") or ""
+end
+
 local function pedir_chave()
-  local ok, r = reaper.GetUserInputs(NOME .. " - ativar licença", 1,
-    "Chave de licença (PLAY-....):,extrawidth=260", "")
-  if not ok then return end
-  local chave = trim(r):upper():gsub("[^A-Z0-9%-]", "")
-  if not chave:match("^PLAY%-%w%w%w%w%-%w%w%w%w%-%w%w%w%w%-%w%w%w%w$") then
-    reaper.ShowMessageBox("Chave inválida. Ela tem este formato:\nPLAY-XXXX-XXXX-XXXX-XXXX", NOME, 0)
-    return
-  end
-  licenca("ativar", chave)
+  E.chv = { raw = "" }
+  local c = chave_limpa(ler_clipboard(true))
+  if chave_ok(c) then E.chv.raw = c end -- chave já copiada: vem preenchida
+  E.painel = "chave"
 end
 
 local function menu_licenca()
   if E.lic_job then return end
   if E.lic.tipo == "licenca" then
-    local r = reaper.ShowMessageBox("PlayPronto licenciado" ..
-      ((E.lic.nome or "") ~= "" and (" para " .. E.lic.nome) or "") ..
-      ((E.lic.email or "") ~= "" and ("\n" .. E.lic.email) or "") ..
-      "\n\nQuer DESATIVAR este computador?\n(libera a vaga para usar a licença em outro PC)", NOME, 4)
-    if r == 6 then licenca("desativar") end
+    E.chv = { raw = "" }
+    E.painel = "conta"
   else
     pedir_chave()
   end
@@ -519,7 +536,7 @@ end
 
 local function fechar_painel()
   bpm_confirmar()
-  E.painel, E.arrasta = nil, false
+  E.painel, E.arrasta, E.conf_desat = nil, false, false
 end
 
 -- botão de seleção (tipo aba): marcado fica laranja
@@ -641,6 +658,120 @@ local function painel_tom()
   if roda ~= 0 then set_tom(E.tom + (roda > 0 and 1 or -1)) end
 end
 
+------------------------------------------------------------------ painéis da licença
+-- sinal de "certo" desenhado (não depende de a fonte ter o caractere ✓)
+local function visto(cx, cy, s)
+  for d = -1, 1 do
+    gfx.line(cx - s, cy + d, cx - s * 0.35, cy + s * 0.6 + d)
+    gfx.line(cx - s * 0.35, cy + s * 0.6 + d, cx + s, cy - s * 0.6 + d)
+  end
+end
+
+local function ativar_chave()
+  local c = chave_limpa(E.chv.raw)
+  if not chave_ok(c) then
+    E.chv.estado, E.chv.msg = "erro", "A chave tem este formato: PLAY-XXXX-XXXX-XXXX-XXXX"
+    return
+  end
+  E.chv.raw, E.chv.estado = c, "ativando"
+  licenca("ativar", chave_fmt(c)) -- servidor espera PLAY-XXXX-XXXX-XXXX-XXXX
+end
+
+local function colar_chave()
+  local c = chave_limpa(ler_clipboard())
+  if c ~= "" then E.chv.raw, E.chv.estado = c, nil
+  else E.chv.estado, E.chv.msg = "erro", "Não tem nenhuma chave copiada. Copie a chave do e-mail e tente de novo." end
+end
+
+local function painel_chave()
+  local C = E.chv
+  local ativando = E.lic_job and E.lic_job.acao == "ativar"
+
+  if C.estado == "ok" and not ativando then -- deu certo
+    moldura_painel("Licença ativada")
+    local cx, cy = PX + PW / 2, PY + 96
+    rgb(40, 95, 55); gfx.circle(cx, cy, 32, 1, 1)
+    rgb(160, 245, 170); visto(cx, cy, 13)
+    fonte(2); centralizado("Tudo pronto!", PY + 142, 255, 255, 255)
+    fonte(3)
+    if (C.nome or "") ~= "" then centralizado("Licenciado para " .. C.nome, PY + 168, 190, 190, 198) end
+    centralizado("Obrigado por comprar o PlayPronto.", PY + 190, 140, 140, 150)
+    if botao("Começar", PX + 18, PY + PH - 48, PW - 36, 34, true) or tecla == 13 then fechar_painel() end
+    return
+  end
+
+  moldura_painel(C.estado == "info" and "Licença" or "Ativar licença")
+  fonte(3)
+  if C.estado == "info" then texto_quebrado(C.msg, PX + 18, PY + 50, PW - 36, 140, 230, 150)
+  else texto_quebrado("Cole a chave que chegou no seu e-mail depois da compra.", PX + 18, PY + 50, PW - 36, 170, 170, 180) end
+
+  -- campo da chave
+  local raw = C.raw or ""
+  local valido = chave_ok(chave_limpa(raw))
+  local fx, fy, fw, fh = PX + 18, PY + 80, PW - 36, 48
+  if C.estado == "erro" then rgb(220, 90, 80) elseif valido then rgb(245, 170, 35) else rgb(90, 90, 102) end
+  caixa(fx - 1, fy - 1, fw + 2, fh + 2, 9, true)
+  rgb(22, 22, 26); caixa(fx + 1, fy + 1, fw - 2, fh - 2, 8, true)
+  fonte(2)
+  local mostra = chave_fmt(raw)
+  if mostra == "" then texto("PLAY-XXXX-XXXX-XXXX-XXXX", fx + 20, fy + 14, 80, 80, 92)
+  else texto(mostra, fx + 16, fy + 14, 255, 255, 255) end
+  if not ativando and (reaper.time_precise() * 2) % 2 < 1.2 then -- cursor piscando
+    rgb(245, 170, 35); gfx.rect(mostra == "" and (fx + 15) or (fx + 17 + gfx.measurestr(mostra)), fy + 13, 2, 22, 1)
+  end
+  if valido then rgb(140, 230, 150); visto(fx + fw - 24, fy + fh / 2, 7) end
+
+  if botao("Colar", PX + 18, PY + 140, 110, 30) and not ativando then colar_chave() end
+  if raw ~= "" and botao("Limpar", PX + 136, PY + 140, 90, 30) and not ativando then C.raw, C.estado = "", nil end
+
+  fonte(3)
+  if ativando then texto("Ativando... conferindo a chave no servidor.", PX + 18, PY + 184, 255, 200, 90)
+  elseif C.estado == "erro" then texto_quebrado(C.msg, PX + 18, PY + 182, PW - 36, 240, 130, 120, 18)
+  else texto("Dica: Ctrl+V cola a chave direto aqui.", PX + 18, PY + 184, 120, 120, 130) end
+
+  local link = (E.lic.link or "") ~= "" and E.lic.tipo ~= "licenca"
+  local aw = link and (PW - 36 - 138) or (PW - 36)
+  if botao(ativando and "Ativando..." or "Ativar", PX + 18, PY + PH - 48, aw, 34, valido and not ativando)
+     and not ativando then ativar_chave() end
+  if link and botao("Comprar", PX + PW - 148, PY + PH - 48, 130, 34) then abrir_link(E.lic.link) end
+
+  -- teclado
+  if not ativando and tecla > 0 then
+    if tecla == 22 then colar_chave()                          -- Ctrl+V
+    elseif tecla == 8 then C.raw, C.estado = raw:sub(1, -2), nil -- apagar
+    elseif tecla == 13 then ativar_chave()
+    elseif tecla < 256 then
+      local ch = string.char(tecla):upper()
+      if ch:match("[A-Z0-9]") and #raw < 20 then C.raw, C.estado = raw .. ch, nil end
+    end
+  end
+end
+
+local function painel_conta()
+  moldura_painel("Sua licença")
+  local L = E.lic
+  local desativando = E.lic_job and E.lic_job.acao == "desativar"
+  fonte(3)
+  local tw = gfx.measurestr("✓ Licenciado")
+  rgb(35, 70, 40); caixa(PX + 18, PY + 50, tw + 20, 24, 11, true)
+  texto("✓ Licenciado", PX + 28, PY + 54, 140, 230, 150)
+  fonte(2); texto((L.nome or "") ~= "" and L.nome or "PlayPronto", PX + 18, PY + 88, 255, 255, 255)
+  fonte(3)
+  if (L.email or "") ~= "" then texto(L.email, PX + 18, PY + 114, 160, 160, 170) end
+  local c = L.chave or ""
+  if #c == 24 then texto("Chave: " .. c:sub(1, 9) .. "-••••-••••-" .. c:sub(-4), PX + 18, PY + 136, 120, 120, 130) end
+  texto_quebrado("Vai trocar de computador? Desative este PC para liberar a vaga e ativar no outro.",
+    PX + 18, PY + 168, PW - 36, 140, 140, 150, 18)
+
+  local by = PY + PH - 48
+  if E.conf_desat and not desativando then rgb(210, 80, 70); caixa(PX + 16, by - 2, 204, 38, 9, true) end
+  local rot = desativando and "Desativando..." or (E.conf_desat and "Confirmar: desativar" or "Desativar este PC")
+  if botao(rot, PX + 18, by, 200, 34) and not desativando then
+    if E.conf_desat then E.conf_desat = false; licenca("desativar") else E.conf_desat = true end
+  end
+  if botao("Fechar", PX + PW - 168, by, 150, 34, true) or tecla == 13 then fechar_painel() end
+end
+
 local function tela_inicio()
   cabecalho("Playback e VS com IA direto no Reaper")
   selo_licenca()
@@ -732,17 +863,17 @@ local function loop()
       apertou = (mouse_antes & 1) == 0 and (gfx.mouse_cap & 1) == 1
       tecla = ch
       roda = gfx.mouse_wheel or 0; gfx.mouse_wheel = 0
-      if E.tela ~= "inicio" then E.painel = nil end
+      if E.tela ~= "inicio" and E.tela ~= "licenca" then E.painel = nil end
       rgb(28, 28, 33); gfx.rect(0, 0, gfx.w, gfx.h, 1)
-      if E.tela == "inicio" then
-        local painel = E.painel
+      if E.tela == "inicio" or E.tela == "licenca" then
+        local painel = E.painel -- painel aberto neste quadro só aparece no próximo (o clique não vaza)
         trava = painel ~= nil
-        tela_inicio()
+        if E.tela == "inicio" then tela_inicio() else tela_licenca() end
         trava = false
-        if painel == "bpm" then painel_bpm() elseif painel == "tom" then painel_tom() end
+        if painel == "bpm" then painel_bpm() elseif painel == "tom" then painel_tom()
+        elseif painel == "chave" then painel_chave() elseif painel == "conta" then painel_conta() end
       elseif E.tela == "processando" then tela_processando()
       elseif E.tela == "pronto" then tela_pronto()
-      elseif E.tela == "licenca" then tela_licenca()
       else tela_erro() end
       mouse_antes = gfx.mouse_cap
       gfx.update()
