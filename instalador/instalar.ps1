@@ -133,14 +133,46 @@ try {
     GravarLinhas $kb $linhas
     Ok "Ação 'PlayPronto' registrada"
 
-    # botão na barra principal (só se a barra já for personalizada; senão não mexemos)
+    # botão na barra principal
     $menu = "$ReaperDir\reaper-menu.ini"
     $m = @(LerLinhas $menu)
     $ini = [Array]::IndexOf($m, "[Main toolbar]")
     $botao = $false
-    if ($ini -ge 0) {
+    if ($ini -lt 0) {
+        # REAPER novo: a barra ainda é a padrão (não está no arquivo). Grava a barra padrão do REAPER 7
+        # (mesmos botões, mesma ordem) com o PlayPronto no final.
+        $padrao = @(
+            "[Main toolbar]",
+            "item_0=40023 New project...",
+            "item_1=40025 Open project...",
+            "item_2=40026 Save project",
+            "item_3=40021 Project settings...",
+            "item_4=40029 Undo",
+            "item_5=40030 Redo",
+            "item_6=40364 Enable metronome",
+            "item_7=42616 Marquee selection",
+            "item_8=-1",
+            "item_9=40041 Enable auto-crossfade",
+            "item_10=1156 Enable item and track media/razor edit grouping",
+            "item_11=1162 Toggle ripple editing",
+            "item_12=40070 Move envelope points with media items",
+            "item_13=40145 Show arrange view grid",
+            "item_14=1157 Enable snapping",
+            "item_15=1135 Enable locking",
+            "item_16=42618 Razor editing",
+            "item_17=_$ACTION_ID PlayPronto",
+            "icon_17=playpronto.png",
+            "tbf_7=1",
+            "tbf_11=1",
+            "tbf_16=1")
+        if ($m.Count -gt 0 -and $m[-1] -ne "") { $m += "" }
+        GravarLinhas $menu ($m + $padrao)
+        $botao = $true
+        Ok "Botão adicionado na barra principal"
+    } else {
         $fim = $m.Count
         for ($i = $ini + 1; $i -lt $m.Count; $i++) { if ($m[$i] -match "^\[") { $fim = $i; break } }
+        while ($fim -gt $ini + 1 -and $m[$fim - 1] -eq "") { $fim-- }   # entra antes das linhas em branco
         $secao = $m[($ini + 1)..($fim - 1)]
         if (-not ($secao -match "_$ACTION_ID")) {
             $nums = $secao | Where-Object { $_ -match "^item_(\d+)=" } | ForEach-Object { [int]($_ -replace "^item_(\d+)=.*", '$1') }
