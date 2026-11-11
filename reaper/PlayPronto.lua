@@ -51,6 +51,7 @@ local E = {
   lic = { tipo = "carregando" },  -- licenca | teste | sem_licenca | erro | carregando
   lic_job = nil,
   chv = { raw = "" },       -- painel da chave: raw, estado (ativando|erro|ok|info), msg, nome
+  lnk = { txt = "" },       -- painel do link: txt, erro
 }
 local janela = true
 local LICENCA_PY = PASTA_CRIADOR .. [[\licenca.py]]
@@ -221,8 +222,21 @@ local function colar_link()
   clip_t = -10
   local c = link_copiado()
   if c then iniciar(limpar_link(c)); return end -- tem link copiado: vai direto
-  local ok, r = reaper.GetUserInputs(NOME, 1, "Link do YouTube:,extrawidth=420", "")
-  if ok and trim(r) ~= "" then iniciar(limpar_link(r)) end
+  if not reaper.CF_GetClipboard then -- sem SWS: pergunta ao Windows o que está copiado
+    local w = trim(ler_clipboard())
+    if w:match("^https?://%S+$") then iniciar(limpar_link(w)); return end
+  end
+  E.lnk = { txt = "" }
+  E.painel = "link" -- nada copiado: painel para colar/digitar o link
+end
+
+-- link digitado no painel: aceita sem o https://
+local function link_normal(s)
+  s = trim(s)
+  if s == "" then return nil end
+  if not s:match("^https?://") and s:match("^[%w%-]+%.[%w%.%-]+/") then s = "https://" .. s end
+  if s:match("^https?://[%w%-]+%.[%w%.%-]+%S*$") then return s end
+  return nil
 end
 
 local function escolher_arquivo()
@@ -772,6 +786,70 @@ local function painel_conta()
   if botao("Fechar", PX + PW - 168, by, 150, 34, true) or tecla == 13 then fechar_painel() end
 end
 
+------------------------------------------------------------------ painel do link
+local function painel_link()
+  local K = E.lnk
+  local txt = K.txt or ""
+  local url = link_normal(txt)
+  local yt = url and select(2, limpar_link(url))
+  moldura_painel("Link da música")
+  fonte(3)
+  texto("Cole o link do YouTube (ou de outro site de vídeo).", PX + 18, PY + 50, 170, 170, 180)
+
+  -- campo do link (texto longo: mostra o final)
+  local fx, fy, fw, fh = PX + 18, PY + 80, PW - 36, 48
+  if K.erro or (txt ~= "" and not url) then rgb(220, 90, 80) elseif url then rgb(245, 170, 35) else rgb(90, 90, 102) end
+  caixa(fx - 1, fy - 1, fw + 2, fh + 2, 9, true)
+  rgb(22, 22, 26); caixa(fx + 1, fy + 1, fw - 2, fh - 2, 8, true)
+  fonte(3)
+  local larg = fw - (url and 56 or 34)
+  local mostra = txt
+  if gfx.measurestr(mostra) > larg then
+    while #mostra > 1 and gfx.measurestr("…" .. mostra) > larg do mostra = mostra:sub(2) end
+    mostra = "…" .. mostra
+  end
+  if txt == "" then texto("https://www.youtube.com/watch?v=...", fx + 20, fy + 15, 80, 80, 92)
+  else texto(mostra, fx + 16, fy + 15, 255, 255, 255) end
+  if (reaper.time_precise() * 2) % 2 < 1.2 then
+    rgb(245, 170, 35); gfx.rect(txt == "" and (fx + 15) or (fx + 17 + gfx.measurestr(mostra)), fy + 13, 2, 22, 1)
+  end
+  if url then rgb(140, 230, 150); visto(fx + fw - 24, fy + fh / 2, 7) end
+
+  if botao("Colar", PX + 18, PY + 140, 110, 30) then
+    local c = trim(ler_clipboard())
+    if c ~= "" then K.txt, K.erro = c:gsub("%s+", ""):sub(1, 400), nil
+    else K.erro = "Não tem nada copiado. Copie o link no YouTube (Ctrl+C) e tente de novo." end
+  end
+  if txt ~= "" and botao("Limpar", PX + 136, PY + 140, 90, 30) then K.txt, K.erro = "", nil end
+
+  fonte(3)
+  if K.erro then texto_quebrado(K.erro, PX + 18, PY + 182, PW - 36, 240, 130, 120, 18)
+  elseif yt then texto("YouTube: youtube.com/watch?v=" .. yt, PX + 18, PY + 184, 120, 200, 120)
+  elseif url then texto("Link de outro site: vamos tentar baixar.", PX + 18, PY + 184, 170, 170, 180)
+  elseif txt ~= "" then texto("Isso não parece um link. Ele começa com https://", PX + 18, PY + 184, 240, 130, 120)
+  else texto("Dica: Ctrl+V cola o link direto aqui.", PX + 18, PY + 184, 120, 120, 130) end
+
+  local function criar()
+    if not url then
+      K.erro = txt == "" and "Cole o link da música primeiro." or "Isso não parece um link. Ele começa com https://"
+      return
+    end
+    fechar_painel(); iniciar((limpar_link(url)))
+  end
+  local rot = E.tipo == "playback" and "Criar playback" or "Criar VS"
+  if botao(rot, PX + 18, PY + PH - 48, PW - 36 - 158, 34, url ~= nil) then criar() end
+  if botao("Arquivo do PC", PX + PW - 168, PY + PH - 48, 150, 34) then fechar_painel(); escolher_arquivo() end
+
+  -- teclado
+  if tecla == 22 then
+    local c = trim(ler_clipboard())
+    if c ~= "" then K.txt, K.erro = c:gsub("%s+", ""):sub(1, 400), nil end
+  elseif tecla == 8 then K.txt, K.erro = txt:sub(1, -2), nil
+  elseif tecla == 13 then criar()
+  elseif tecla >= 33 and tecla <= 126 and #txt < 400 then K.txt, K.erro = txt .. string.char(tecla), nil
+  end
+end
+
 local function tela_inicio()
   cabecalho("Playback e VS com IA direto no Reaper")
   selo_licenca()
@@ -871,7 +949,8 @@ local function loop()
         if E.tela == "inicio" then tela_inicio() else tela_licenca() end
         trava = false
         if painel == "bpm" then painel_bpm() elseif painel == "tom" then painel_tom()
-        elseif painel == "chave" then painel_chave() elseif painel == "conta" then painel_conta() end
+        elseif painel == "chave" then painel_chave() elseif painel == "conta" then painel_conta()
+        elseif painel == "link" then painel_link() end
       elseif E.tela == "processando" then tela_processando()
       elseif E.tela == "pronto" then tela_pronto()
       else tela_erro() end
